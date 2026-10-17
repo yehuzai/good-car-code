@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+    tags: ["v*"]
     paths-ignore:
       - "**.md"
       - ".gitignore"
+
+permissions:
+  contents: write
 
 jobs:
   macos:
@@ -34,10 +38,12 @@ jobs:
             app.py
       - name: Self test (bundled tesseract only)
         run: dist/GoodCarCode.app/Contents/MacOS/GoodCarCode --selftest --require-bundled
+      - name: Zip app bundle
+        run: ditto -c -k --keepParent dist/GoodCarCode.app GoodCarCode-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: GoodCarCode-macos
-          path: dist/GoodCarCode.app
+          path: GoodCarCode-macos.zip
 
   windows:
     runs-on: windows-latest
@@ -83,3 +89,39 @@ jobs:
         with:
           name: GoodCarCode-windows
           path: dist/GoodCarCode.exe
+
+  release:
+    # 只有推 v* tag 时才发布；普通 push 只构建和自检
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoodCarCode-macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoodCarCode-windows
+      - name: Append checksums to notes
+        run: |
+          {
+            echo
+            echo "## 校验下载是否完整（SHA-256）"
+            echo
+            echo '```'
+            sha256sum GoodCarCode-macos.zip GoodCarCode.exe
+            echo '```'
+            echo
+            echo "macOS：\`shasum -a 256 GoodCarCode-macos.zip\`；Windows：\`certutil -hashfile GoodCarCode.exe SHA256\`。"
+          } >> NOTES.md
+          cat NOTES.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME} 车牌筛选工具" \
+            --notes-file NOTES.md \
+            GoodCarCode-macos.zip GoodCarCode.exe

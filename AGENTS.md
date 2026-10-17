@@ -34,10 +34,11 @@ dist/GoodCarCode.app/Contents/MacOS/GoodCarCode --selftest --require-bundled
 
 ## 发布
 
-push 到 main 后 CI 会跑自检并出两个 artifact（需要登录且 90 天过期）。对外发用
-Release，mac 的 zip 必须用 `ditto -c -k --keepParent` 打，否则解压后 app 起不来：
+push 到 main 只构建 + 自检，出两个 artifact（需要登录且 90 天过期）。对外发布走 tag：
 
 ```bash
-gh release create vX.Y.Z --repo <owner>/good-car-code --notes-file NOTES.md \
-  GoodCarCode-macos.zip GoodCarCode.exe
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
+
+tag 触发 `release` job：下载两个产物 → 用 `ditto -c -k --keepParent` 打的 mac zip →
+把 SHA-256 追加进 NOTES.md → 创建 Release。别手动上传，本地到 GitHub 的上传带宽很窄。
