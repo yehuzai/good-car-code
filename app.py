@@ -932,8 +932,12 @@ def selftest(argv: list[str]) -> int:
     buffer: list[str] = []
 
     def say(message: str = "") -> None:
-        print(message, flush=True)
         buffer.append(message)
+        try:
+            print(message, flush=True)
+        except Exception:
+            # Windows 控制台可能是 cp1252，打不出中文；日志文件才是权威输出
+            pass
 
     try:
         return _selftest_body(say, require_bundled)
@@ -1003,6 +1007,13 @@ def _selftest_body(say, require_bundled: bool) -> int:
 
 
 def main() -> int:
+    # Windows 控制台默认不是 UTF-8，先切一下，免得中文输出直接抛异常
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     args = sys.argv[1:]
     if "--selftest" in args:
         return selftest(args)

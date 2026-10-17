@@ -67,8 +67,15 @@ jobs:
           $env:PLATE_SELFTEST_LOG = "selftest.log"
           & dist\GoodCarCode.exe --selftest --require-bundled
           $code = $LASTEXITCODE
-          if (Test-Path selftest.log) { Get-Content selftest.log }
-          if ($code -ne 0) { exit $code }
+          $lines = @()
+          if (Test-Path selftest.log) {
+            $lines = Get-Content selftest.log
+            $lines
+          }
+          # 窗口版 exe 的退出码不可靠，所以以日志最后一行 ok 为准
+          if ($code -ne 0 -or $lines.Count -eq 0 -or $lines[-1].Trim() -ne "ok") {
+            throw "self-test did not pass (exit code $code)"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: GoodCarCode-windows
