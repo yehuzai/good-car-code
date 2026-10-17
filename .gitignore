@@ -1,0 +1,13 @@
+.venv/
+build/
+dist/
+*.app/
+__pycache__/
+*.pyc
+.DS_Store
+
+# never commit real user data; adjust these globs for the project
+*.xlsx
+*.xlsm
+*.xls
+*.csv

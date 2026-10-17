@@ -1,0 +1,45 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: >
+          pyinstaller --noconfirm --clean --windowed
+          --name GoodCarCode
+          --osx-bundle-identifier com.local.GoodCarCode
+          app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoodCarCode-macos
+          path: dist/GoodCarCode.app
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: >
+          pyinstaller --noconfirm --clean --windowed --onefile
+          --name GoodCarCode
+          app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoodCarCode-windows
+          path: dist/GoodCarCode.exe
