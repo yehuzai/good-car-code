@@ -498,6 +498,24 @@ def tessdata_dir() -> str:
     return _TESSDATA_DIR
 
 
+def tesseract_version(command: str = "", timeout: int = 20) -> str:
+    """跑一次 `tesseract --version`，确认它真的能启动（Windows 上能查出缺 DLL）。"""
+    import subprocess
+
+    exe, _source = find_tesseract(command)
+    try:
+        proc = subprocess.run([exe, "--version"], capture_output=True, timeout=timeout,
+                              text=True, errors="replace")
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"tesseract 启动超时：{exe}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"tesseract 无法执行：{exe}（{exc}）") from exc
+    output = (proc.stdout or proc.stderr or "").strip()
+    if proc.returncode != 0:
+        raise RuntimeError(f"tesseract 返回 {proc.returncode}：{output[:200]}")
+    return output.splitlines()[0] if output else "（无版本信息）"
+
+
 # --------------------------------------------------------------------------- #
 # 图片识别
 # --------------------------------------------------------------------------- #
@@ -527,7 +545,7 @@ class DetectParams:
         return params
 
 
-def ocr_crop(crop: np.ndarray, params: DetectParams) -> str:
+def ocr_crop(crop: np.ndarray, params: DetectParams, timeout: int = 60) -> str:
     """对单个候选区域做 OCR，返回只含字母数字的大写结果。"""
     config = f"--oem 3 --psm {int(params.psm)}"
     if params.whitelist:
@@ -535,7 +553,8 @@ def ocr_crop(crop: np.ndarray, params: DetectParams) -> str:
     # 路径里没有空格时再补一个 --tessdata-dir，双保险
     if _TESSDATA_DIR and " " not in _TESSDATA_DIR:
         config += f" --tessdata-dir {_TESSDATA_DIR}"
-    raw = pytesseract.image_to_string(crop, config=config)
+    # 给个超时，免得 tesseract 卡住（缺 DLL、弹窗等）时整个程序跟着挂死
+    raw = pytesseract.image_to_string(crop, config=config, timeout=timeout)
     return re.sub(r"[^0-9A-Za-z]", "", raw).upper()
 
 

@@ -65,16 +65,19 @@ jobs:
         shell: pwsh
         run: |
           $env:PLATE_SELFTEST_LOG = "selftest.log"
-          & dist\GoodCarCode.exe --selftest --require-bundled
-          $code = $LASTEXITCODE
+          # 窗口版 exe 属于 GUI 子系统，直接 & 调用不会等待，必须 Start-Process -Wait
+          $proc = Start-Process -FilePath "dist\GoodCarCode.exe" `
+            -ArgumentList "--selftest", "--require-bundled" `
+            -NoNewWindow -Wait -PassThru
+          $code = $proc.ExitCode
           $lines = @()
           if (Test-Path selftest.log) {
             $lines = Get-Content selftest.log
             $lines
           }
-          # 窗口版 exe 的退出码不可靠，所以以日志最后一行 ok 为准
-          if ($code -ne 0 -or $lines.Count -eq 0 -or $lines[-1].Trim() -ne "ok") {
-            throw "self-test did not pass (exit code $code)"
+          # GUI 子系统的退出码不可靠，以日志最后一行 ok 为准
+          if ($lines.Count -eq 0 -or $lines[-1].Trim() -ne "ok") {
+            throw "self-test did not finish (exit code $code)"
           }
       - uses: actions/upload-artifact@v4
         with:

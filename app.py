@@ -979,6 +979,7 @@ def _selftest_body(say, require_bundled: bool) -> int:
     say(f"      {exe}（来源：{source}）")
     if core.tessdata_dir():
         say(f"      tessdata：{core.tessdata_dir()}")
+    say(f"      版本：{core.tesseract_version(exe)}")
 
     say("[4/5] OCR 识别")
     params = core.DetectParams.from_rules(rules)
