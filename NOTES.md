@@ -26,6 +26,8 @@ Intel 芯片的 Mac 用不了这个 `.app`（只打了 arm64），需要自己 `
 ## 校验下载是否完整（SHA-256）
 
 ```
-<macos zip 的 sha256>  GoodCarCode-macos.zip
-<exe 的 sha256>  GoodCarCode.exe
+fa0f09e2b7f6138360d2879acaf1619c8372d1ad470b773a83cca11f2976a9ec  GoodCarCode-macos.zip
+b91d3ec3c34ac10d6ceaca4ef827f0f831a0cce1395c2d293dad034774f8086d  GoodCarCode.exe
 ```
+
+macOS 上：`shasum -a 256 GoodCarCode-macos.zip`；Windows 上：`certutil -hashfile GoodCarCode.exe SHA256`。
