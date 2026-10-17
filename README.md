@@ -1,32 +1,67 @@
 # 车牌筛选工具
 
-一句话说明这个 app 做什么。
+挑车牌号的小工具：从截图里 OCR 出候选车牌，或者按号段批量展开，再按一套
+“吉利 / 忌讳”规则打分排序，选完之后能导出结果表格（CSV）和文本报告。
 
 ## 直接使用
 
-**macOS**：双击 `GoodCarCode.app`。首次打开若被 Gatekeeper 拦，右键点 app →「打开」，或
+| 系统 | 文件 | 用法 |
+| --- | --- | --- |
+| macOS（Apple 芯片） | `GoodCarCode-macos.zip` | 解压得到 `GoodCarCode.app`，双击运行 |
+| Windows 64 位 | `GoodCarCode.exe` | 直接双击，免安装 |
 
-```bash
-xattr -dr com.apple.quarantine /path/to/GoodCarCode.app
-```
+识别用的 `tesseract` 已经随程序打包，目标机器不需要额外安装。
 
-**Windows**：双击 `GoodCarCode.exe`（单文件，免安装）。被 SmartScreen 拦时点
-「更多信息」→「仍要运行」。
+**首次打开被系统拦截**
+
+- macOS：未做苹果签名/公证。提示「来自身份不明的开发者」时右键点 app →「打开」，
+  或先执行 `xattr -dr com.apple.quarantine /path/to/GoodCarCode.app`。
+- Windows：SmartScreen 拦截时点「更多信息」→「仍要运行」。
+
+## 三个页签
+
+**图片识别**：选一张车牌截图 → 预览 → 「开始识别」，结果按得分排序。点某一行会在
+下方放大显示该车牌的局部，方便核对 OCR 结果。可以保存带框的标注图、导出 CSV、
+生成文本报告。
+
+**号段筛选**：左侧每行写一个号段（`FU5N00-FU5N99`），可先「解析号段」看数量，
+「开始评估」后右侧给出全部号码的排序结果，支持只看前 N 个。
+
+**规则与设置**：开关每条规则、调整分值（支持写 `1亿`、`1000万`）、编辑幸运 / 忌讳
+字符和不建议尾号、调整识别参数（PSM、最小面积、宽高比、车牌正则、OCR 白名单、
+tesseract 路径）。规则可以存成 JSON 反复使用，也能「试算一个号码」验证规则。
+
+## 打分规则
+
+| 规则 | 默认分值 | 判定范围 |
+| --- | --- | --- |
+| 重复（88） | +1 亿 | 数字部分 |
+| 顺子（1234） | +10 亿 | 数字部分 |
+| 对子（6868） | +1000 万 | 数字部分 |
+| 幸运字符 | +1 亿 / 每个命中 | 完整车牌（含字母） |
+| 忌讳字符 | -1000 万 / 每个命中 | 完整车牌（含字母） |
+| 不建议尾号（0、05） | -100 万 | 完整车牌 |
+
+得分只是这套规则的相对排序，仅供选号参考。
 
 ## 从源码运行 / 重新打包
 
-需要 Python 3.9+ 且带 tkinter。
+需要 Python 3.9+ 且带 tkinter，识别还需要 `tesseract`：
 
 ```bash
+brew install tesseract          # macOS
 pip install -r requirements.txt
-python app.py                    # 直接运行
-python app.py --selftest         # 无界面自检
+python app.py                   # 直接运行
+python app.py --selftest        # 无界面自检
 ```
 
-打包：mac 上 `bash build_macos.sh`；Windows 上运行 `build_windows.bat`。
-PyInstaller 不能跨系统打包，`.exe` 必须在 Windows 机器或 CI 上生成。
+打包：macOS 上 `bash build_macos.sh`，Windows 上运行 `build_windows.bat`
+（会先安装 Tesseract-OCR）。PyInstaller 不能跨系统打包，`.exe` 必须在 Windows
+机器或 CI 上生成。
 
 ## 说明
 
-- 开发约定见 `AGENTS.md`。
-- 发布说明见 `NOTES.md`。
+- 开发约定见 `AGENTS.md`，发布说明见 `NOTES.md`。
+- 识别用的是「轮廓提取 + Tesseract」的老办法，倾斜、反光、字很小的截图上识别率
+  一般；需要更准就得换专门的车牌检测模型。
+- 车牌里的汉字会被正则过滤掉，只保留 5-7 位字母数字。

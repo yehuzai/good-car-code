@@ -1,19 +1,27 @@
-#!/usr/bin/env python3
-"""车牌筛选工具 - desktop app.
+"""车牌筛选工具 - Tkinter 界面（三个页签）与打包入口。
 
-Replace the sample feature in core.py with the real logic; this file is the
-Tkinter UI plus a headless entry point. Keeping a `--selftest` mode lets CI and
-the build pipeline verify the app with no display.
+界面里做三件事：从图片识别车牌、按号段批量筛选、编辑打分规则并出文本报告。
+所有可测逻辑都在 core.py；本文件只负责界面和 `--selftest` 入口。
 
-Headless self-test (no window):
+无界面自检：
     python app.py --selftest
+    python app.py --selftest --require-bundled    # 只认随程序分发的 tesseract
 """
+
+from __future__ import annotations
 
 import os
 import queue
 import sys
+import tempfile
 import threading
 import traceback
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+import cv2
+import numpy as np
+from PIL import Image, ImageTk
 
 import core
 
@@ -29,109 +37,975 @@ else:
     BASE_FONT = ("Sans", 10)
     MONO = ("Monospace", 10)
 
+DEFAULT_SEGMENTS = """\
+FX8X00-FX8X99
+FU5N00-FU5N99
+FR0H00-FR0H99
+FR0J00-FR0J99
+FR0G00-FR0G99
+FR0F00-FR0F99
+FR0D00-FR0D99
+FR0E00-FR0E99
+"""
 
-def run_job(text, log):
-    """Do the work; log progress via `log(str)`. Replace with the real feature."""
-    log("开始")
-    result = core.process(text or "")
-    log("结果：" + str(result))
-    return result
+DISPLAY_LIMITS = ["全部", "前 50", "前 100", "前 500", "前 1000"]
+
+FLAG_LABELS = {
+    "repeat": "重复字符（如 88）",
+    "sequence": "顺子（如 1234）",
+    "pair": "对子（如 6868）",
+    "lucky": "幸运字符",
+    "unlucky": "忌讳字符",
+    "bad_tail": "不建议尾号",
+}
 
 
-def build_app():
-    from tkinter import ttk
-    import tkinter as tk
+def _fit(image: np.ndarray, max_width: int, max_height: int,
+         allow_upscale: bool = False) -> np.ndarray:
+    """等比缩放到目标框内。"""
+    height, width = image.shape[:2]
+    scale = min(max_width / width, max_height / height)
+    if not allow_upscale:
+        scale = min(scale, 1.0)
+    if scale <= 0:
+        return image
+    if abs(scale - 1.0) < 0.01:
+        return image
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_NEAREST
+    return cv2.resize(image, (max(1, int(width * scale)), max(1, int(height * scale))),
+                      interpolation=interpolation)
 
-    root = tk.Tk()
-    root.title(APP_TITLE)
-    root.minsize(560, 420)
 
-    style = ttk.Style(root)
-    style.configure(".", font=BASE_FONT)
-    style.configure("Title.TLabel", font=(BASE_FONT[0], BASE_FONT[1] + 5, "bold"))
-    style.configure("Hint.TLabel", foreground="#667085")
+class PlateApp:
+    """主窗口。"""
 
-    app = {"busy": False, "q": queue.Queue()}
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.rules = core.default_rules()
+        self.rules_path: str | None = None
 
-    outer = ttk.Frame(root, padding=16)
-    outer.pack(fill="both", expand=True)
-    ttk.Label(outer, text=APP_TITLE, style="Title.TLabel").pack(anchor="w")
+        self.image: np.ndarray | None = None
+        self.image_path = ""
+        self.annotated: np.ndarray | None = None
+        self.image_plates: list[core.Plate] = []
+        self._plates_by_index: dict[int, core.Plate] = {}
 
-    inp = tk.Text(outer, height=8, font=MONO, relief="solid", borderwidth=1)
-    inp.pack(fill="both", expand=True, pady=10)
+        self.segment_numbers: list[str] = []
+        self.segment_plates: list[core.Plate] = []
 
-    act = ttk.Frame(outer)
-    act.pack(fill="x")
-    run_btn = ttk.Button(act, text="开始")
-    run_btn.pack(side="left")
-    status = ttk.Label(act, text="就绪", style="Hint.TLabel")
-    status.pack(side="left", padx=10)
+        self._photo = None
+        self._zoom_photo = None
+        self._render_job = None
+        self._queue: queue.Queue = queue.Queue()
+        self._busy = False
+        self._pending_logs: list[str] = []
+        self._last_dir = os.path.expanduser("~/Downloads")
 
-    logbox = tk.Text(outer, height=6, font=MONO, state="disabled", relief="solid",
-                     borderwidth=1, background="#ffffff")
-    logbox.pack(fill="both", expand=True, pady=(10, 0))
+        self._build_ui()
+        self._load_rules_into_ui()
+        self.root.after(120, self._poll_queue)
 
-    def log(line):
-        app["q"].put(("log", line))
+    # ------------------------------------------------------------------ #
+    # 界面搭建
+    # ------------------------------------------------------------------ #
 
-    def drain():
+    def _build_ui(self) -> None:
+        self.root.title(APP_TITLE)
+        self.root.geometry("1240x800")
+        self.root.minsize(1100, 700)
+
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("Treeview", rowheight=24)
+        style.configure(".", font=BASE_FONT)
+        style.configure("Treeview.Heading", font=(BASE_FONT[0], BASE_FONT[1], "bold"))
+        style.configure("Title.TLabel", font=(BASE_FONT[0], BASE_FONT[1] + 2, "bold"))
+        style.configure("Hint.TLabel", foreground="#666666")
+
+        self.status_var = tk.StringVar(value="就绪")
+        bar = ttk.Frame(self.root, padding=(10, 4, 10, 8))
+        bar.pack(side="bottom", fill="x")
+        self.progress = ttk.Progressbar(bar, mode="indeterminate", length=160)
+        self.progress.pack(side="left")
+        ttk.Label(bar, textvariable=self.status_var, style="Hint.TLabel").pack(
+            side="left", padx=12)
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=6, pady=6)
+
+        self.tab_image = ttk.Frame(self.notebook)
+        self.tab_segment = ttk.Frame(self.notebook)
+        self.tab_rules = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_image, text="  图片识别  ")
+        self.notebook.add(self.tab_segment, text="  号段筛选  ")
+        self.notebook.add(self.tab_rules, text="  规则与设置  ")
+
+        self._build_image_tab()
+        self._build_segment_tab()
+        self._build_rules_tab()
+
+    # ------------------------------ 页签 1 ------------------------------ #
+
+    def _build_image_tab(self) -> None:
+        parent = self.tab_image
+
+        toolbar = ttk.Frame(parent, padding=(10, 8, 10, 4))
+        toolbar.pack(fill="x")
+        ttk.Button(toolbar, text="选择图片…", command=self.choose_image).pack(side="left")
+        self.image_var = tk.StringVar(value="尚未选择图片")
+        ttk.Label(toolbar, textvariable=self.image_var, style="Hint.TLabel").pack(
+            side="left", padx=10)
+        self.show_annot = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text="显示识别框", variable=self.show_annot,
+                        command=self.render_preview).pack(side="right")
+        ttk.Button(toolbar, text="清除", command=self.clear_image).pack(side="right", padx=8)
+
+        paned = ttk.PanedWindow(parent, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        left = ttk.Frame(paned)
+        right = ttk.Frame(paned)
+        paned.add(left, weight=3)
+        paned.add(right, weight=2)
+
+        self.preview_canvas = tk.Canvas(left, bg="#1f1f23", highlightthickness=0)
+        self.preview_canvas.pack(fill="both", expand=True)
+        self.preview_canvas.bind("<Configure>", self._on_preview_resize)
+
+        box = ttk.LabelFrame(right, text="识别结果", padding=6)
+        box.pack(fill="both", expand=True)
+        columns = ("rank", "plate", "digits", "score", "hits")
+        self.image_tree = ttk.Treeview(box, columns=columns, show="headings",
+                                       selectmode="browse")
+        for key, text, width, anchor in (
+            ("rank", "序号", 46, "center"),
+            ("plate", "车牌号", 88, "center"),
+            ("digits", "数字", 66, "center"),
+            ("score", "得分", 84, "e"),
+            ("hits", "命中规则", 140, "w"),
+        ):
+            self.image_tree.heading(key, text=text)
+            self.image_tree.column(key, width=width, anchor=anchor,
+                                   stretch=(key == "hits"))
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.image_tree.yview)
+        self.image_tree.configure(yscrollcommand=scroll.set)
+        self.image_tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+        self.image_tree.bind("<<TreeviewSelect>>", self.on_image_select)
+
+        zoom_box = ttk.LabelFrame(right, text="局部放大（点击上方结果查看）", padding=6)
+        zoom_box.pack(fill="x", pady=(8, 0))
+        self.zoom_canvas = tk.Canvas(zoom_box, height=130, bg="#1f1f23",
+                                     highlightthickness=0)
+        self.zoom_canvas.pack(fill="x")
+        self.zoom_canvas.bind("<Configure>", lambda _e: self.on_image_select())
+
+        actions = ttk.Frame(parent, padding=(10, 0, 10, 8))
+        actions.pack(fill="x")
+        self.detect_button = ttk.Button(actions, text="开始识别", command=self.run_detect)
+        self.detect_button.pack(side="left")
+        ttk.Button(actions, text="生成文本报告", command=self.report_for_image).pack(
+            side="left", padx=6)
+        ttk.Button(actions, text="导出 CSV", command=self.csv_for_image).pack(side="left")
+        ttk.Button(actions, text="保存标注图", command=self.save_annotated).pack(
+            side="left", padx=6)
+
+    # ------------------------------ 页签 2 ------------------------------ #
+
+    def _build_segment_tab(self) -> None:
+        parent = self.tab_segment
+        paned = ttk.PanedWindow(parent, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=10, pady=8)
+        left = ttk.Frame(paned, width=360)
+        right = ttk.Frame(paned)
+        paned.add(left, weight=0)
+        paned.add(right, weight=1)
+
+        entry_box = ttk.LabelFrame(left, text="号段列表（每行一个）", padding=8)
+        entry_box.pack(fill="both", expand=True)
+        ttk.Label(entry_box, text="格式：FU5N00-FU5N99（末尾数字自动展开）",
+                  style="Hint.TLabel").pack(anchor="w", pady=(0, 4))
+        text_frame = ttk.Frame(entry_box)
+        text_frame.pack(fill="both", expand=True)
+        self.segment_text = tk.Text(text_frame, height=16, width=34, wrap="none",
+                                    font=MONO)
+        seg_scroll = ttk.Scrollbar(text_frame, orient="vertical",
+                                   command=self.segment_text.yview)
+        self.segment_text.configure(yscrollcommand=seg_scroll.set)
+        self.segment_text.grid(row=0, column=0, sticky="nsew")
+        seg_scroll.grid(row=0, column=1, sticky="ns")
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+        self.segment_text.insert("1.0", DEFAULT_SEGMENTS)
+
+        row = ttk.Frame(entry_box)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Button(row, text="解析号段", command=self.preview_segment_count).pack(side="left")
+        ttk.Button(row, text="载入文件…", command=self.load_segments_file).pack(
+            side="left", padx=6)
+        ttk.Button(row, text="清空", command=lambda: self.segment_text.delete("1.0", "end")).pack(
+            side="left")
+
+        self.segment_count_var = tk.StringVar(value="")
+        ttk.Label(entry_box, textvariable=self.segment_count_var,
+                  style="Hint.TLabel").pack(anchor="w", pady=(6, 0))
+
+        result_box = ttk.LabelFrame(right, text="评估结果", padding=6)
+        result_box.pack(fill="both", expand=True)
+        head = ttk.Frame(result_box)
+        head.pack(fill="x", pady=(0, 6))
+        ttk.Label(head, text="显示：").pack(side="left")
+        self.display_limit = tk.StringVar(value=DISPLAY_LIMITS[2])
+        chooser = ttk.Combobox(head, textvariable=self.display_limit, width=8,
+                               state="readonly", values=DISPLAY_LIMITS)
+        chooser.pack(side="left")
+        chooser.bind("<<ComboboxSelected>>", lambda _e: self.refresh_segment_tree())
+        self.segment_summary_var = tk.StringVar(value="尚未评估")
+        ttk.Label(head, textvariable=self.segment_summary_var,
+                  style="Hint.TLabel").pack(side="left", padx=12)
+
+        table = ttk.Frame(result_box)
+        table.pack(fill="both", expand=True)
+        columns = ("rank", "plate", "digits", "score", "hits")
+        self.segment_tree = ttk.Treeview(table, columns=columns, show="headings")
+        for key, text, width, anchor in (
+            ("rank", "排名", 60, "center"),
+            ("plate", "车牌号", 110, "center"),
+            ("digits", "数字", 80, "center"),
+            ("score", "得分", 100, "e"),
+            ("hits", "命中规则", 260, "w"),
+        ):
+            self.segment_tree.heading(key, text=text)
+            self.segment_tree.column(key, width=width, anchor=anchor,
+                                     stretch=(key == "hits"))
+        seg_scroll2 = ttk.Scrollbar(table, orient="vertical",
+                                    command=self.segment_tree.yview)
+        self.segment_tree.configure(yscrollcommand=seg_scroll2.set)
+        self.segment_tree.grid(row=0, column=0, sticky="nsew")
+        seg_scroll2.grid(row=0, column=1, sticky="ns")
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+
+        actions = ttk.Frame(parent, padding=(10, 0, 10, 8))
+        actions.pack(fill="x")
+        self.segment_button = ttk.Button(actions, text="开始评估", command=self.run_segments)
+        self.segment_button.pack(side="left")
+        ttk.Button(actions, text="生成文本报告", command=self.report_for_segments).pack(
+            side="left", padx=6)
+        ttk.Button(actions, text="导出 CSV", command=self.csv_for_segments).pack(side="left")
+
+    # ------------------------------ 页签 3 ------------------------------ #
+
+    def _build_rules_tab(self) -> None:
+        parent = self.tab_rules
+        body = ttk.Frame(parent, padding=10)
+        body.pack(fill="both", expand=True)
+        left = ttk.Frame(body)
+        right = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        right.pack(side="left", fill="both", expand=True)
+
+        score_box = ttk.LabelFrame(left, text="命中规则与分值", padding=8)
+        score_box.pack(fill="x")
+        self.flag_vars: dict[str, tk.BooleanVar] = {}
+        self.weight_vars: dict[str, tk.StringVar] = {}
+        defaults = core.default_rules()
+        for row, key in enumerate(defaults["flags"]):
+            var = tk.BooleanVar(value=True)
+            self.flag_vars[key] = var
+            ttk.Checkbutton(score_box, text=FLAG_LABELS[key], variable=var).grid(
+                row=row, column=0, sticky="w", pady=2)
+            weight_var = tk.StringVar(value=str(defaults["weights"][key]))
+            self.weight_vars[key] = weight_var
+            ttk.Entry(score_box, textvariable=weight_var, width=16).grid(
+                row=row, column=1, sticky="e", padx=(12, 0))
+        score_box.columnconfigure(0, weight=1)
+
+        detect_box = ttk.LabelFrame(left, text="识别参数", padding=8)
+        detect_box.pack(fill="x", pady=(10, 0))
+        self.psm_var = tk.StringVar(value="6")
+        self.min_area_var = tk.StringVar(value="1000")
+        self.min_aspect_var = tk.StringVar(value="2.0")
+        self.pattern_var = tk.StringVar(value=r"[A-Z0-9]{5,7}")
+        self.whitelist_var = tk.StringVar(
+            value="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        self.tesseract_var = tk.StringVar(value="")
+        fields = (
+            ("PSM（6=整块，7=单行）", self.psm_var),
+            ("候选最小面积", self.min_area_var),
+            ("候选最小宽高比", self.min_aspect_var),
+            ("车牌正则", self.pattern_var),
+            ("OCR 字符白名单", self.whitelist_var),
+            ("tesseract 路径", self.tesseract_var),
+        )
+        for row, (label, var) in enumerate(fields):
+            ttk.Label(detect_box, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Entry(detect_box, textvariable=var, width=26).grid(
+                row=row, column=1, sticky="e", padx=(12, 0))
+        detect_box.columnconfigure(0, weight=1)
+
+        lucky_box = ttk.LabelFrame(right, text="幸运字符（每行一个，支持字母组合）", padding=8)
+        lucky_box.pack(fill="both", expand=True)
+        self.lucky_text = tk.Text(lucky_box, height=10, width=44, wrap="none", font=MONO)
+        lucky_scroll = ttk.Scrollbar(lucky_box, orient="vertical",
+                                     command=self.lucky_text.yview)
+        self.lucky_text.configure(yscrollcommand=lucky_scroll.set)
+        self.lucky_text.pack(side="left", fill="both", expand=True)
+        lucky_scroll.pack(side="right", fill="y")
+
+        unlucky_box = ttk.LabelFrame(right, text="忌讳字符（每行一个）", padding=8)
+        unlucky_box.pack(fill="both", expand=True, pady=(10, 0))
+        self.unlucky_text = tk.Text(unlucky_box, height=7, width=44, wrap="none", font=MONO)
+        unlucky_scroll = ttk.Scrollbar(unlucky_box, orient="vertical",
+                                       command=self.unlucky_text.yview)
+        self.unlucky_text.configure(yscrollcommand=unlucky_scroll.set)
+        self.unlucky_text.pack(side="left", fill="both", expand=True)
+        unlucky_scroll.pack(side="right", fill="y")
+
+        tail_row = ttk.Frame(right)
+        tail_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(tail_row, text="不建议尾号（逗号分隔）：").pack(side="left")
+        self.bad_tail_var = tk.StringVar(value="0, 05")
+        ttk.Entry(tail_row, textvariable=self.bad_tail_var).pack(
+            side="left", fill="x", expand=True)
+
+        actions = ttk.Frame(parent, padding=(10, 0, 10, 8))
+        actions.pack(fill="x")
+        ttk.Button(actions, text="应用规则", command=self.apply_rules).pack(side="left")
+        ttk.Button(actions, text="保存规则…", command=self.save_rules_file).pack(
+            side="left", padx=6)
+        ttk.Button(actions, text="载入规则…", command=self.load_rules_file).pack(side="left")
+        ttk.Button(actions, text="恢复默认", command=self.reset_rules).pack(
+            side="left", padx=6)
+        ttk.Button(actions, text="试算一个号码…", command=self.test_score).pack(side="left")
+        self.rules_summary_var = tk.StringVar(value="")
+        ttk.Label(actions, textvariable=self.rules_summary_var,
+                  style="Hint.TLabel").pack(side="left", padx=12)
+
+    # ------------------------------------------------------------------ #
+    # 规则 <-> 界面
+    # ------------------------------------------------------------------ #
+
+    def _load_rules_into_ui(self) -> None:
+        rules = self.rules
+        for key, var in self.flag_vars.items():
+            var.set(bool(rules["flags"].get(key, True)))
+        for key, var in self.weight_vars.items():
+            var.set(str(rules["weights"].get(key, 0)))
+        self.lucky_text.delete("1.0", "end")
+        self.lucky_text.insert("1.0", "\n".join(rules["lucky_chars"]))
+        self.unlucky_text.delete("1.0", "end")
+        self.unlucky_text.insert("1.0", "\n".join(rules["unlucky_chars"]))
+        self.bad_tail_var.set(", ".join(rules["bad_tail"]))
+        detect = rules["detect"]
+        self.psm_var.set(str(detect.get("psm", 6)))
+        self.min_area_var.set(str(detect.get("min_area", 1000)))
+        self.min_aspect_var.set(str(detect.get("min_aspect", 2.0)))
+        self.pattern_var.set(str(detect.get("pattern", r"[A-Z0-9]{5,7}")))
+        self.whitelist_var.set(str(detect.get("whitelist", "")))
+        self.tesseract_var.set(str(detect.get("tesseract_cmd", "")))
+        self.rules_summary_var.set(self._rules_summary())
+
+    def _rules_summary(self) -> str:
+        rules = self.rules
+        enabled = sum(1 for v in rules["flags"].values() if v)
+        return (f"已启用 {enabled}/6 条规则，幸运字符 {len(rules['lucky_chars'])} 个，"
+                f"忌讳字符 {len(rules['unlucky_chars'])} 个")
+
+    def _text_lines(self, widget: tk.Text) -> list[str]:
+        raw = widget.get("1.0", "end").splitlines()
+        return [line.strip() for line in raw if line.strip()]
+
+    def _apply_ui_to_rules(self) -> None:
+        """把界面上的内容读回 self.rules，非法输入会抛 ValueError。"""
+        rules = core.default_rules()
+        for key, var in self.flag_vars.items():
+            rules["flags"][key] = bool(var.get())
+        for key, var in self.weight_vars.items():
+            rules["weights"][key] = core.parse_weight(var.get(), rules["weights"][key])
+        rules["lucky_chars"] = self._text_lines(self.lucky_text)
+        rules["unlucky_chars"] = self._text_lines(self.unlucky_text)
+        rules["bad_tail"] = [t.strip() for t in self.bad_tail_var.get().replace("，", ",").split(",")
+                             if t.strip()]
+        rules["detect"] = {
+            "min_area": int(float(self.min_area_var.get())),
+            "min_aspect": float(self.min_aspect_var.get()),
+            "psm": int(float(self.psm_var.get())),
+            "whitelist": self.whitelist_var.get().strip(),
+            "pattern": self.pattern_var.get().strip() or r"[A-Z0-9]{5,7}",
+            "tesseract_cmd": self.tesseract_var.get().strip(),
+        }
+        self.rules = core.normalize_rules(rules)
+
+    def apply_rules(self) -> None:
+        try:
+            self._apply_ui_to_rules()
+        except ValueError as exc:
+            messagebox.showerror("规则不合法", str(exc))
+            return
+        self.rules_summary_var.set(self._rules_summary())
+        self.set_status("规则已应用（对下一次识别/评估生效）")
+
+    def reset_rules(self) -> None:
+        if not messagebox.askyesno("恢复默认", "确定把当前规则恢复成默认值？"):
+            return
+        self.rules = core.default_rules()
+        self._load_rules_into_ui()
+        self.set_status("已恢复默认规则")
+
+    def save_rules_file(self) -> None:
+        try:
+            self._apply_ui_to_rules()
+        except ValueError as exc:
+            messagebox.showerror("规则不合法", str(exc))
+            return
+        path = filedialog.asksaveasfilename(
+            title="保存规则", defaultextension=".json", initialdir=self._last_dir,
+            initialfile="plate_rules.json", filetypes=[("JSON 规则", "*.json")])
+        if not path:
+            return
+        core.save_rules(path, self.rules)
+        self.rules_path = path
+        self.set_status(f"规则已保存：{path}")
+
+    def load_rules_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="载入规则", initialdir=self._last_dir,
+            filetypes=[("JSON 规则", "*.json"), ("全部文件", "*.*")])
+        if not path:
+            return
+        try:
+            self.rules = core.load_rules(path)
+        except Exception as exc:
+            messagebox.showerror("载入失败", str(exc))
+            return
+        self.rules_path = path
+        self._load_rules_into_ui()
+        self.set_status(f"规则已载入：{path}")
+
+    def test_score(self) -> None:
+        value = simpledialog.askstring("试算号码", "输入一个车牌（如 FU5N88）：",
+                                       parent=self.root)
+        if not value:
+            return
+        try:
+            self._apply_ui_to_rules()
+        except ValueError as exc:
+            messagebox.showerror("规则不合法", str(exc))
+            return
+        plate = core.make_plate(1, value, self.rules)
+        hits = "、".join(plate.hits) or "无"
+        messagebox.showinfo(
+            "试算结果",
+            f"号码：{plate.text}\n数字部分：{plate.digits or '-'}\n"
+            f"得分：{plate.price}（{core.format_price(plate.price)}）\n命中：{hits}")
+
+    def _read_detect_params(self) -> core.DetectParams:
+        self._apply_ui_to_rules()
+        return core.DetectParams.from_rules(self.rules)
+
+    # ------------------------------------------------------------------ #
+    # 页签 1：图片识别
+    # ------------------------------------------------------------------ #
+
+    def choose_image(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择图片", initialdir=self._last_dir,
+            filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
+                       ("全部文件", "*.*")])
+        if not path:
+            return
+        try:
+            image = core.load_image(path)
+        except Exception as exc:
+            messagebox.showerror("读取失败", str(exc))
+            return
+        self._last_dir = os.path.dirname(path) or self._last_dir
+        self.image = image
+        self.image_path = path
+        self.annotated = None
+        self.image_plates = []
+        self._plates_by_index = {}
+        self.image_tree.delete(*self.image_tree.get_children())
+        self.image_var.set(f"{path}   ({image.shape[1]}x{image.shape[0]})")
+        self.zoom_canvas.delete("all")
+        self.render_preview()
+        self.set_status("图片已载入，点“开始识别”提取车牌")
+
+    def clear_image(self) -> None:
+        self.image = None
+        self.image_path = ""
+        self.annotated = None
+        self.image_plates = []
+        self._plates_by_index = {}
+        self.image_tree.delete(*self.image_tree.get_children())
+        self.zoom_canvas.delete("all")
+        self.image_var.set("尚未选择图片")
+        self.render_preview()
+        self.set_status("已清除图片")
+
+    def run_detect(self) -> None:
+        if self.image is None:
+            messagebox.showinfo("提示", "请先选择一张图片")
+            return
+        try:
+            params = self._read_detect_params()
+        except ValueError as exc:
+            messagebox.showerror("识别参数不合法", str(exc))
+            return
+        image = self.image
+        rules = self.rules
+        logs: list[str] = []
+        self._pending_logs = logs
+
+        def job():
+            core.configure_tesseract(params.tesseract_cmd)
+            return core.detect_plates(image, rules, params, log=logs.append)
+
+        self._start_work(job, self.on_detect_done, "正在识别车牌…")
+
+    def on_detect_done(self, result) -> None:
+        if isinstance(result, Exception):
+            messagebox.showerror("识别失败", str(result))
+            self.set_status("识别失败")
+            return
+        plates, annotated = result
+        self.image_plates = plates
+        self.annotated = annotated
+        self._plates_by_index = {plate.index: plate for plate in plates}
+        self._fill_tree(self.image_tree, plates, limit=None)
+        self.render_preview()
+        self.zoom_canvas.delete("all")
+        if plates:
+            best = core.sort_plates(plates)[0]
+            self.set_status(f"识别到 {len(plates)} 个号码，最佳 {best.text}"
+                            f"（{core.format_price(best.price)}）")
+        else:
+            tail = self._pending_logs[-1] if self._pending_logs else ""
+            self.set_status(f"没有识别到符合规则的号码。{tail}")
+
+    def on_image_select(self, _event=None) -> None:
+        selection = self.image_tree.selection()
+        canvas = self.zoom_canvas
+        canvas.delete("all")
+        if not selection or self.image is None:
+            return
+        plate = self._plates_by_index.get(int(selection[0]))
+        if plate is None or not plate.box:
+            return
+        try:
+            crop = core.zoom_region(self.image, plate.box, scale=1.0, margin=10)
+        except ValueError:
+            return
+        width = max(canvas.winfo_width() - 8, 60)
+        height = max(canvas.winfo_height() - 8, 60)
+        fitted = _fit(crop, width, height, allow_upscale=True)
+        self._zoom_photo = ImageTk.PhotoImage(
+            Image.fromarray(core.bgr_to_rgb(fitted)))
+        canvas.create_image(canvas.winfo_width() / 2, canvas.winfo_height() / 2,
+                            image=self._zoom_photo)
+        canvas.create_text(8, 8, anchor="nw", fill="#dddddd",
+                           text=f"{plate.text}  得分 {core.format_price(plate.price)}")
+
+    def render_preview(self) -> None:
+        canvas = self.preview_canvas
+        canvas.delete("all")
+        image = self.image
+        if self.show_annot.get() and self.annotated is not None:
+            image = self.annotated
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+        if image is None:
+            canvas.create_text(max(width, 200) / 2, max(height, 200) / 2,
+                               text="点击左上角“选择图片…”开始",
+                               fill="#8a8a92", font=(BASE_FONT[0], BASE_FONT[1] + 1))
+            return
+        fitted = _fit(image, max(width - 12, 80), max(height - 12, 80))
+        self._photo = ImageTk.PhotoImage(Image.fromarray(core.bgr_to_rgb(fitted)))
+        canvas.create_image(width / 2, height / 2, image=self._photo)
+
+    def _on_preview_resize(self, _event=None) -> None:
+        if self._render_job is not None:
+            self.root.after_cancel(self._render_job)
+        self._render_job = self.root.after(80, self._render_preview_now)
+
+    def _render_preview_now(self) -> None:
+        self._render_job = None
+        self.render_preview()
+
+    def save_annotated(self) -> None:
+        if self.annotated is None:
+            messagebox.showinfo("提示", "请先识别图片")
+            return
+        default_name = "标注图.png"
+        if self.image_path:
+            stem = os.path.splitext(os.path.basename(self.image_path))[0]
+            default_name = f"{stem}_标注.png"
+        path = filedialog.asksaveasfilename(
+            title="保存标注图", defaultextension=".png", initialdir=self._last_dir,
+            initialfile=default_name,
+            filetypes=[("PNG 图片", "*.png"), ("JPEG 图片", "*.jpg")])
+        if not path:
+            return
+        try:
+            core.save_image(path, self.annotated)
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        self._last_dir = os.path.dirname(path) or self._last_dir
+        self.set_status(f"标注图已保存：{path}")
+
+    def report_for_image(self) -> None:
+        if not self.image_plates:
+            messagebox.showinfo("提示", "还没有识别结果")
+            return
+        text = core.build_report(
+            "车牌筛选报告（图片识别）",
+            self.image_path or "（未记录来源）",
+            self.image_plates,
+            extra_lines=[f"图片尺寸：{self.image.shape[1]}x{self.image.shape[0]}"]
+            if self.image is not None else (),
+            top_n=10,
+        )
+        self.show_report_window(text, core.suggest_name("车牌报告_识别"))
+
+    def csv_for_image(self) -> None:
+        if not self.image_plates:
+            messagebox.showinfo("提示", "还没有识别结果")
+            return
+        self._save_csv(self.image_plates, "车牌结果_识别")
+
+    # ------------------------------------------------------------------ #
+    # 页签 2：号段筛选
+    # ------------------------------------------------------------------ #
+
+    def preview_segment_count(self) -> None:
+        lines = self.segment_text.get("1.0", "end").splitlines()
+        try:
+            numbers = core.expand_segments(lines)
+        except ValueError as exc:
+            self.segment_count_var.set(f"解析失败：{exc}")
+            return
+        self.segment_count_var.set(f"共解析出 {len(numbers)} 个号码")
+
+    def load_segments_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="载入号段文件", initialdir=self._last_dir,
+            filetypes=[("文本", "*.txt *.csv"), ("全部文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                content = handle.read()
+        except UnicodeDecodeError:
+            with open(path, "r", encoding="gbk", errors="ignore") as handle:
+                content = handle.read()
+        except Exception as exc:
+            messagebox.showerror("读取失败", str(exc))
+            return
+        self._last_dir = os.path.dirname(path) or self._last_dir
+        self.segment_text.delete("1.0", "end")
+        self.segment_text.insert("1.0", content)
+        self.preview_segment_count()
+
+    def run_segments(self) -> None:
+        lines = self.segment_text.get("1.0", "end").splitlines()
+        rules = self.rules
+        try:
+            self._apply_ui_to_rules()
+            rules = self.rules
+        except ValueError as exc:
+            messagebox.showerror("规则不合法", str(exc))
+            return
+
+        def job():
+            numbers = core.expand_segments(lines)
+            if not numbers:
+                raise ValueError("没有解析到任何号段，请检查输入格式")
+            return numbers, core.build_plates(numbers, rules)
+
+        self._start_work(job, self.on_segments_done, "正在评估号段…")
+
+    def on_segments_done(self, result) -> None:
+        if isinstance(result, Exception):
+            messagebox.showerror("评估失败", str(result))
+            self.set_status("评估失败")
+            return
+        numbers, plates = result
+        self.segment_numbers = numbers
+        self.segment_plates = plates
+        self.refresh_segment_tree()
+        self.set_status(f"共 {len(numbers)} 个号码，最佳 {plates[0].text}"
+                        f"（{core.format_price(plates[0].price)}）")
+
+    def refresh_segment_tree(self) -> None:
+        limit_text = self.display_limit.get()
+        limit = None
+        if limit_text != "全部":
+            try:
+                limit = int(limit_text.replace("前", "").strip())
+            except ValueError:
+                limit = None
+        self._fill_tree(self.segment_tree, self.segment_plates, limit)
+        if self.segment_plates:
+            total = len(self.segment_plates)
+            shown = total if limit is None else min(limit, total)
+            self.segment_summary_var.set(
+                f"共 {total} 个号码，显示前 {shown} 个")
+        else:
+            self.segment_summary_var.set("尚未评估")
+
+    def report_for_segments(self) -> None:
+        if not self.segment_plates:
+            messagebox.showinfo("提示", "还没有评估结果")
+            return
+        lines = [f"号段数：{self._segment_line_count()}，"
+                 f"展开号码数：{len(self.segment_numbers)}"]
+        text = core.build_report(
+            "车牌筛选报告（号段筛选）",
+            "号段列表（见下）",
+            self.segment_plates,
+            extra_lines=lines + ["", "【号段明细】"] +
+            [f"  {line.strip()}" for line in
+             self.segment_text.get("1.0", "end").splitlines() if line.strip()],
+            top_n=20,
+        )
+        self.show_report_window(text, core.suggest_name("车牌报告_号段"))
+
+    def csv_for_segments(self) -> None:
+        if not self.segment_plates:
+            messagebox.showinfo("提示", "还没有评估结果")
+            return
+        self._save_csv(self.segment_plates, "车牌结果_号段")
+
+    def _segment_line_count(self) -> int:
+        count = 0
+        for line in self.segment_text.get("1.0", "end").splitlines():
+            if line.strip() and not line.strip().startswith("#"):
+                count += 1
+        return count
+
+    # ------------------------------------------------------------------ #
+    # 公共部分
+    # ------------------------------------------------------------------ #
+
+    def _fill_tree(self, tree: ttk.Treeview, plates, limit=None) -> None:
+        tree.delete(*tree.get_children())
+        ordered = core.sort_plates(plates)
+        if limit is not None:
+            ordered = ordered[:limit]
+        for rank, plate in enumerate(ordered, start=1):
+            hits = "、".join(plate.hits)
+            if len(hits) > 46:
+                hits = hits[:46] + "…"
+            tree.insert("", "end", iid=str(plate.index),
+                        values=(rank, plate.text, plate.digits or "-",
+                                core.format_price(plate.price), hits or "-"))
+
+    def _save_csv(self, plates, prefix: str) -> None:
+        path = filedialog.asksaveasfilename(
+            title="导出 CSV", defaultextension=".csv", initialdir=self._last_dir,
+            initialfile=core.suggest_name(prefix, ".csv"),
+            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            core.write_csv(path, plates)
+        except Exception as exc:
+            messagebox.showerror("导出失败", str(exc))
+            return
+        self._last_dir = os.path.dirname(path) or self._last_dir
+        self.set_status(f"CSV 已导出：{path}")
+
+    def show_report_window(self, text: str, suggested_name: str) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("文本报告预览")
+        window.geometry("820x600")
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill="both", expand=True)
+        text_widget = tk.Text(frame, wrap="none", font=MONO)
+        scroll_y = ttk.Scrollbar(frame, orient="vertical", command=text_widget.yview)
+        scroll_x = ttk.Scrollbar(frame, orient="horizontal", command=text_widget.xview)
+        text_widget.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        text_widget.insert("1.0", text)
+
+        buttons = ttk.Frame(window, padding=(10, 0, 10, 10))
+        buttons.pack(fill="x")
+
+        def save() -> None:
+            path = filedialog.asksaveasfilename(
+                title="保存文本报告", defaultextension=".txt",
+                initialdir=self._last_dir, initialfile=suggested_name,
+                filetypes=[("文本报告", "*.txt"), ("全部文件", "*.*")])
+            if not path:
+                return
+            try:
+                core.write_text(path, text)
+            except Exception as exc:
+                messagebox.showerror("保存失败", str(exc))
+                return
+            self._last_dir = os.path.dirname(path) or self._last_dir
+            self.set_status(f"报告已保存：{path}")
+            window.destroy()
+
+        def copy() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.set_status("报告已复制到剪贴板")
+
+        ttk.Button(buttons, text="保存为文件…", command=save).pack(side="left")
+        ttk.Button(buttons, text="复制到剪贴板", command=copy).pack(side="left", padx=6)
+        ttk.Button(buttons, text="关闭", command=window.destroy).pack(side="right")
+
+    def set_status(self, message: str) -> None:
+        self.status_var.set(message)
+
+    # ------------------------------------------------------------------ #
+    # 后台任务
+    # ------------------------------------------------------------------ #
+
+    def _start_work(self, job, on_done, message: str) -> None:
+        if self._busy:
+            messagebox.showinfo("请稍候", "还有一个任务在执行中")
+            return
+        self._busy = True
+        self.set_status(message)
+        self.progress.start(12)
+        self._set_buttons(enabled=False)
+
+        def runner() -> None:
+            try:
+                result = job()
+            except BaseException as exc:  # noqa: BLE001 - 统一回抛到 UI 线程
+                result = exc
+            self._queue.put((on_done, result))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _set_buttons(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for button in (self.detect_button, self.segment_button):
+            button.configure(state=state)
+
+    def _poll_queue(self) -> None:
         try:
             while True:
-                kind, payload = app["q"].get_nowait()
-                if kind == "log":
-                    logbox.configure(state="normal")
-                    logbox.insert("end", payload + "\n")
-                    logbox.see("end")
-                    logbox.configure(state="disabled")
-                elif kind == "status":
-                    status.configure(text=payload)
-                elif kind == "done":
-                    run_btn.configure(state="normal")
-                    app["busy"] = False
+                callback, result = self._queue.get_nowait()
+                self._busy = False
+                self.progress.stop()
+                self._set_buttons(enabled=True)
+                callback(result)
         except queue.Empty:
             pass
-        root.after(100, drain)
+        self.root.after(120, self._poll_queue)
 
-    def start():
-        if app["busy"]:
-            return
-        app["busy"] = True
-        run_btn.configure(state="disabled")
-        status.configure(text="处理中...")
-        text = inp.get("1.0", "end")
 
-        def worker():
-            try:
-                run_job(text, log)
-                app["q"].put(("status", "完成"))
-            except Exception as exc:  # noqa: BLE001
-                log("出错：" + str(exc))
-                app["q"].put(("status", "失败"))
-            app["q"].put(("done", True))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    run_btn.configure(command=start)
-
+def build_app() -> tk.Tk:
+    """建好主窗口，返回 root（--selftest 之外都走这里）。"""
+    root = tk.Tk()
+    PlateApp(root)
     root.update_idletasks()
-    w = min(root.winfo_reqwidth() + 20, root.winfo_screenwidth() - 60)
-    h = min(root.winfo_reqheight() + 10, root.winfo_screenheight() - 140)
-    root.geometry("%dx%d" % (max(560, w), max(420, h)))
-
-    drain()
+    # 默认 1240x800，但不超过屏幕，否则内容会被裁掉
+    width = max(1100, min(1240, root.winfo_screenwidth() - 80))
+    height = max(700, min(800, root.winfo_screenheight() - 140))
+    root.minsize(min(1100, width), min(700, height))
+    root.geometry(f"{width}x{height}")
     return root
 
 
-def selftest(argv):
-    result = run_job("selftest input", lambda s: print("  " + s))
-    assert result is not None
-    print("ok")
+def selftest(argv: list[str]) -> int:
+    """无界面跑一遍：打分 -> 号段 -> tesseract -> OCR -> 报告。
+
+    Windows 的窗口版 exe 没有控制台，所以支持 PLATE_SELFTEST_LOG 把过程写到文件。
+    """
+    require_bundled = "--require-bundled" in argv
+    log_path = os.environ.get("PLATE_SELFTEST_LOG", "")
+    buffer: list[str] = []
+
+    def say(message: str = "") -> None:
+        print(message, flush=True)
+        buffer.append(message)
+
+    try:
+        return _selftest_body(say, require_bundled)
+    except BaseException as exc:  # noqa: BLE001
+        # 不能把异常抛出去：窗口版产物弹窗会卡住 CI
+        say(f"失败：{type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        if log_path:
+            try:
+                core.write_text(log_path, "\n".join(buffer) + "\n")
+            except OSError:
+                pass
+
+
+def _selftest_body(say, require_bundled: bool) -> int:
+    say("车牌筛选工具 自检")
+
+    say("[1/5] 规则与打分")
+    rules = core.default_rules()
+    baseline = {"FU5N88": 190_000_000, "FR0H68": 200_000_000,
+                "FX8X00": 199_000_000, "FU5N05": -11_000_000}
+    for text, expected in baseline.items():
+        price, hits = core.score_plate(text, rules)
+        assert price == expected, f"{text} 得分 {price}，期望 {expected}"
+        say(f"      {text} -> {core.format_price(price)}"
+            f"（{'、'.join(hits) if hits else '无命中'}）")
+
+    say("[2/5] 号段展开")
+    numbers = core.expand_segments(["# 注释行", "FU5N00-FU5N03", "FR0H98-FR0H99"])
+    assert numbers == ["FU5N00", "FU5N01", "FU5N02", "FU5N03", "FR0H98", "FR0H99"], numbers
+    ranked = core.build_plates(numbers, rules)
+    assert ranked and ranked[0].price >= ranked[-1].price
+    say(f"      {len(numbers)} 个号码，最佳 {ranked[0].text}"
+        f"（{core.format_price(ranked[0].price)}）")
+
+    say("[3/5] tesseract")
+    exe, source = core.configure_tesseract(bundled_only=require_bundled)
+    say(f"      {exe}（来源：{source}）")
+    if core.tessdata_dir():
+        say(f"      tessdata：{core.tessdata_dir()}")
+
+    say("[4/5] OCR 识别")
+    params = core.DetectParams.from_rules(rules)
+    sample = core.make_sample_plate_image("FU5N88")
+    text = core.ocr_crop(sample, params)
+    say(f"      合成样本 OCR：{text!r}")
+    assert len(text) >= 4, f"OCR 没有返回可用结果：{text!r}"
+    plates, annotated = core.detect_plates(sample, rules, params)
+    say(f"      整图识别到 {len(plates)} 个号码：{[p.text for p in plates]}")
+    assert annotated.shape == sample.shape, "标注图尺寸不对"
+    assert plates, "合成样本上没识别到任何号码"
+
+    say("[5/5] 文本报告")
+    out_dir = tempfile.mkdtemp(prefix="plate_selftest_")
+    text_path = os.path.join(out_dir, "report.txt")
+    csv_path = os.path.join(out_dir, "plates.csv")
+    core.write_text(text_path, core.build_report("自检报告", "合成样本", ranked))
+    core.write_csv(csv_path, ranked)
+    for path in (text_path, csv_path):
+        assert os.path.getsize(path) > 0, f"{path} 是空文件"
+    say(f"      {text_path}（{os.path.getsize(text_path)} 字节）")
+    say(f"      {csv_path}（{os.path.getsize(csv_path)} 字节）")
+
+    say("ok")
     return 0
 
 
-def main():
-    if "--selftest" in sys.argv:
-        return selftest(sys.argv[2:])
+def main() -> int:
+    args = sys.argv[1:]
+    if "--selftest" in args:
+        return selftest(args)
     try:
         build_app().mainloop()
     except Exception:

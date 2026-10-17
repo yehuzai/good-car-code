@@ -2,12 +2,20 @@
 build/
 dist/
 *.app/
+*.spec
 __pycache__/
 *.pyc
 .DS_Store
 
-# never commit real user data; adjust these globs for the project
+# 打包时临时放置 tesseract 的目录
+.tesseract-bundle/
+stage/
+
+# 绝不提交用户数据和导出结果
 *.xlsx
 *.xlsm
 *.xls
 *.csv
+*报告*.txt
+selftest.log
+输出/

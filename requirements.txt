@@ -1,2 +1,5 @@
-# Runtime dependencies for the packaged app, one per line, e.g.:
-# openpyxl>=3.1
+# 打包运行时依赖（tesseract 是外部可执行文件，打包时会一起带走）
+opencv-python-headless>=4.9,<6
+numpy>=1.26
+pillow>=10
+pytesseract>=0.3.10

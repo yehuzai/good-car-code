@@ -17,11 +17,23 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
-      - run: >
-          pyinstaller --noconfirm --clean --windowed
-          --name GoodCarCode
-          --osx-bundle-identifier com.local.GoodCarCode
-          app.py
+      - run: brew install tesseract
+      - name: Build app bundle
+        run: |
+          set -euo pipefail
+          TESSERACT="$(command -v tesseract)"
+          TESSDATA="$(cd "$(dirname "$TESSERACT")/../share/tessdata" && pwd)"
+          mkdir -p stage/tessdata
+          cp "$TESSDATA/eng.traineddata" stage/tessdata/
+          if [ -f "$TESSDATA/osd.traineddata" ]; then cp "$TESSDATA/osd.traineddata" stage/tessdata/; fi
+          pyinstaller --noconfirm --clean --windowed \
+            --name GoodCarCode \
+            --osx-bundle-identifier com.local.GoodCarCode \
+            --add-binary "$TESSERACT:tesseract" \
+            --add-data "stage/tessdata:tesseract/tessdata" \
+            app.py
+      - name: Self test (bundled tesseract only)
+        run: dist/GoodCarCode.app/Contents/MacOS/GoodCarCode --selftest --require-bundled
       - uses: actions/upload-artifact@v4
         with:
           name: GoodCarCode-macos
@@ -35,10 +47,28 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
-      - run: >
-          pyinstaller --noconfirm --clean --windowed --onefile
-          --name GoodCarCode
-          app.py
+      - name: Install tesseract
+        run: choco install tesseract --no-progress -y
+      - name: Build exe
+        shell: pwsh
+        run: |
+          $tess = "C:\Program Files\Tesseract-OCR"
+          Copy-Item -Recurse -Force $tess ".tesseract-bundle"
+          Get-ChildItem ".tesseract-bundle\tessdata\*.traineddata" |
+            Where-Object { $_.Name -notin @("eng.traineddata", "osd.traineddata") } |
+            Remove-Item -Force
+          pyinstaller --noconfirm --clean --windowed --onefile `
+            --name GoodCarCode `
+            --add-data ".tesseract-bundle;tesseract" `
+            app.py
+      - name: Self test (bundled tesseract only)
+        shell: pwsh
+        run: |
+          $env:PLATE_SELFTEST_LOG = "selftest.log"
+          & dist\GoodCarCode.exe --selftest --require-bundled
+          $code = $LASTEXITCODE
+          if (Test-Path selftest.log) { Get-Content selftest.log }
+          if ($code -ne 0) { exit $code }
       - uses: actions/upload-artifact@v4
         with:
           name: GoodCarCode-windows
