@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import traceback
+import unicodedata
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -26,7 +27,7 @@ from PIL import Image, ImageTk
 import core
 
 APP_TITLE = "车牌筛选工具"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 if sys.platform == "darwin":
     BASE_FONT = ("PingFang SC", 13)
@@ -60,6 +61,135 @@ FLAG_LABELS = {
     "bad_tail": "不建议尾号",
 }
 
+# 内置使用说明。改功能时记得同步这里（以及 README.md）。
+HELP_SECTIONS: list[tuple[str, str]] = [
+    ("1. 这个工具能做什么", """
+把挑车牌的流程收在一起：从截图识别候选号码、按号段批量展开、按规则打分排序，
+再按需要导出结果。所有计算都在本机完成，不联网。
+
+· 图片识别：在车牌截图里找号码，识别结果按得分排序。
+· 号段筛选：输入号段（如 FU5N00-FU5N99），一次评估上百个号码。
+· 打分规则：重复、顺子、对子、幸运字符、忌讳字符、尾号，分值都可改。
+· 数字能量：八星磁场、81 数理、河图五行，作为额外参考，可整体关闭。
+· 导出：文本报告（.txt）、结果表格（.csv）、带框标注图（.png/.jpg）。
+"""),
+    ("2. 三步快速上手", """
+第一步：在「图片识别」里选择图片，点「开始识别」；或者在「号段筛选」里写好号段，
+点「开始评估」。
+
+第二步：在右侧结果表里点某一行，下方会显示该号码的细节（图片页签还会放大车牌局部），
+用来核对识别结果和参考意见。
+
+第三步：点「生成文本报告」预览并保存，或者「导出 CSV」拿到完整表格。
+"""),
+    ("3. 图片识别", """
+支持的图片格式：png、jpg/jpeg、bmp、webp、tif/tiff。中文路径、带空格的路径都可以。
+
+识别流程：灰度化 → 对比度增强 → 去噪 → 锐化 → 二值化 → 找轮廓 → 逐个区域 OCR。
+只有面积和宽高比像车牌的候选区域才会送去识别，结果还要符合 5-7 位字母数字才会留下。
+
+· 勾选「显示识别框」可以在预览里看标注；「清除」只清空当前图片和结果。
+· 点结果行 → 下方放大该车牌，方便肉眼核对 OCR 是否读错。
+· 「保存标注图」会把编号、号码、得分画在原图上。
+
+识别不到或识别错时，可以按顺序试：
+  · 截图里的车牌要完整、尽量水平，字别太小、别糊；
+  · 在「规则与设置」里把 PSM 改成 7（单行文本）；
+  · 调小「候选最小面积」、调小「候选最小宽高比」；
+  · 车牌正则放宽（比如 [A-Z0-9]{4,8}）；
+  · 确认 tesseract 路径正确（页签底部有版本提示）。
+"""),
+    ("4. 号段筛选", """
+每行写一个号段，格式是「起始号码-结束号码」，例如：
+    FU5N00-FU5N99
+
+· 分隔符支持 -、~、～、「至」、「到」；以 # 开头的行是注释，会被忽略。
+· 两端只有最后一段数字可以不同，位数要一致；程序会把这段数字逐个展开。
+· 先点「解析号段」可以看一共会展开多少个号码，避免手误。
+· 「显示」下拉框控制表格里显示前多少个（全部 / 前 50 / 前 100 / 前 500 / 前 1000），
+  导出报告和 CSV 始终是全部号码。
+
+号段也可以从文件载入（.txt / .csv），一行一个号段。
+"""),
+    ("5. 数字能量（可选参考）", """
+只分析车牌的数字部分，字母不参与组合。口径：
+
+· 八星磁场：相邻两位数字 → 天医 / 延年 / 生气 / 伏位（吉），
+  绝命 / 五鬼 / 六煞 / 祸害（凶）。含 0 的组合记为无星。
+· 81 数理：各位数字之和，超过 81 就反复减 80，再查吉 / 半吉 / 凶。
+· 河图五行：1/6 水、2/7 火、3/8 木、4/9 金、5/0 土，统计分布和缺失。
+· 车主匹配（可选）：填生日后按日柱、生肖和号码五行给出相合 / 相克提示。
+
+能量分 = 50 + 八星分×4 + 81 数理±15 + 五行齐全加分（+ 车主匹配最多 ±15），
+限制在 0-100：≥75 偏吉、≥55 中平、其余偏凶。
+
+默认只展示、不改变「得分」。想让它影响排序，可以在本页签切换「排序依据」为
+「能量分」，或者保留「得分相同时按能量分排序」。
+
+· 逐颗星可以单独关掉、改权重；81 数理和五行加分也能关。
+· 「试算一个号码」会立刻给出完整口径，改规则后可以马上验证。
+· 这部分属于民俗 / 娱乐参考，不是科学结论。
+"""),
+    ("6. 规则与设置", """
+· 分值可以直接写 1亿、1000万、-100万，也可以写 -1000000。
+· 幸运 / 忌讳字符每行一个，支持字母组合（如 A43、G86）。
+  幸运 / 忌讳 / 尾号匹配「完整车牌字符」，重复 / 顺子 / 对子只看数字部分。
+· 不建议尾号用逗号分隔，例如 0, 05。
+· 「应用规则」会立刻用已有号码重算（不需要重新识别图片），并刷新表格和报告。
+· 「保存规则…」/「载入规则…」把整套规则存成 JSON，换机器也能带走。
+· 「恢复默认」把规则恢复成出厂值。
+· 「试算号码…」弹窗输入一个车牌，直接看得分和命中项。
+
+识别参数：
+  · PSM 6 = 整块文本，7 = 单行文本（车牌通常 6 或 7）。
+  · 候选最小面积 / 最小宽高比：越小越宽松，越大越严格。
+  · 车牌正则：识别结果必须完全匹配才会留下，默认 [A-Z0-9]{5,7}。
+  · OCR 字符白名单：默认只认大写字母和数字，能明显减少误读。
+  · tesseract 路径：留空则自动找；打包版会用随程序分发的那一份。
+"""),
+    ("7. 导出与报告", """
+· 生成文本报告：先弹出预览窗口，可以「保存为文件…」或「复制到剪贴板」。
+  内容包含统计摘要、全量排序表、推荐 Top N，以及（开启时）数字能量参考段落。
+· 导出 CSV：带 BOM 的 UTF-8，Excel 直接打开不乱码；包含得分和数字能量各列。
+· 保存标注图：图片页签专用，把识别框、编号、得分画在原图上。
+· 报告和 CSV 都按当前排序依据输出（规则得分或能量分）。
+"""),
+    ("8. 常见问题", """
+问：首次打开被系统拦住？
+答：macOS 右键点 app →「打开」，或执行 xattr -dr com.apple.quarantine GoodCarCode.app；
+    Windows 点「更多信息」→「仍要运行」。
+
+问：提示找不到 tesseract？
+答：打包版自带 tesseract，正常不会出现。源码运行时执行 brew install tesseract
+    （macOS），或在「规则与设置」里填写 tesseract 路径。
+
+问：得分和能量分为什么不一样？
+答：得分是车牌字符规则算出来的相对分值，能量分是八星 / 81 数理 / 五行的 0-100 参考分。
+    两者口径不同，默认只有得分参与排序。
+
+问：同一个号码两次识别结果不同？
+答：OCR 受截图清晰度影响。可以放大图片重截、调 PSM 或白名单，或者手动用「试算」核对。
+
+问：改完规则要重新识别吗？
+答：不需要。点「应用规则」会用已识别的号码直接重算。
+
+问：换电脑后规则还在吗？
+答：规则只在本次运行里有效，除非用「保存规则…」存成 JSON，下次「载入规则…」。
+"""),
+    ("9. 快捷键", """
+F1                          打开本使用说明（Mac 上可能需要按 fn+F1）
+Cmd+O（Windows 为 Ctrl+O）   选择图片
+回车                        在「试算」输入框里直接分析
+"""),
+    ("10. 关于与免责", """
+车牌筛选工具，用来把候选号码按规则排个序、给点参考。
+
+· 打分规则和数字能量都来自常见民俗口径，属于娱乐 / 参考，不构成任何承诺。
+· 识别结果可能受截图质量影响，重要号码请以官方渠道为准。
+· 项目地址：https://github.com/yehuzai/good-car-code
+"""),
+]
+
 
 def _fit(image: np.ndarray, max_width: int, max_height: int,
          allow_upscale: bool = False) -> np.ndarray:
@@ -75,6 +205,12 @@ def _fit(image: np.ndarray, max_width: int, max_height: int,
     interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_NEAREST
     return cv2.resize(image, (max(1, int(width * scale)), max(1, int(height * scale))),
                       interpolation=interpolation)
+
+
+def _display_width(text: str) -> int:
+    """按中日韩字符占两列计算宽度，用于文本报告里的分隔线。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in text)
 
 
 class PlateApp:
@@ -134,6 +270,7 @@ class PlateApp:
         self.progress.pack(side="left")
         ttk.Label(bar, textvariable=self.status_var, style="Hint.TLabel").pack(
             side="left", padx=12)
+        ttk.Button(bar, text="使用说明 F1", command=self.show_help).pack(side="right")
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=6, pady=6)
@@ -142,15 +279,22 @@ class PlateApp:
         self.tab_segment = ttk.Frame(self.notebook)
         self.tab_rules = ttk.Frame(self.notebook)
         self.tab_energy = ttk.Frame(self.notebook)
+        self.tab_help = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_image, text="  图片识别  ")
         self.notebook.add(self.tab_segment, text="  号段筛选  ")
         self.notebook.add(self.tab_energy, text="  数字能量  ")
         self.notebook.add(self.tab_rules, text="  规则与设置  ")
+        self.notebook.add(self.tab_help, text="  使用说明  ")
 
         self._build_image_tab()
         self._build_segment_tab()
         self._build_energy_tab()
         self._build_rules_tab()
+        self._build_help_tab()
+        self._build_menu()
+        self.root.bind_all("<F1>", lambda _event: self.show_help())
+        mod = "Command" if sys.platform == "darwin" else "Control"
+        self.root.bind_all(f"<{mod}-o>", lambda _event: self.choose_image())
 
     # ------------------------------ 页签 1 ------------------------------ #
 
@@ -544,6 +688,123 @@ class PlateApp:
         self.rules_summary_var = tk.StringVar(value="")
         ttk.Label(actions, textvariable=self.rules_summary_var,
                   style="Hint.TLabel").pack(side="left", padx=12)
+
+    # ------------------------------ 页签 5 ------------------------------ #
+
+    def _build_help_tab(self) -> None:
+        parent = self.tab_help
+        body = ttk.Frame(parent, padding=(10, 10, 10, 6))
+        body.pack(fill="both", expand=True)
+
+        toc_frame = ttk.Frame(body, width=180)
+        toc_frame.pack(side="left", fill="y")
+        toc_frame.pack_propagate(False)
+        ttk.Label(toc_frame, text="目录", style="Title.TLabel").pack(anchor="w", pady=(0, 6))
+        self.help_toc = tk.Listbox(toc_frame, activestyle="none", exportselection=False,
+                                   font=BASE_FONT, highlightthickness=0,
+                                   borderwidth=1, relief="solid")
+        for title, _body in HELP_SECTIONS:
+            self.help_toc.insert("end", title)
+        self.help_toc.pack(fill="both", expand=True)
+        self.help_toc.bind("<<ListboxSelect>>", self._jump_help)
+        self.help_toc.selection_set(0)
+
+        text_frame = ttk.Frame(body)
+        text_frame.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        self.help_text = tk.Text(text_frame, wrap="word", font=BASE_FONT,
+                                 padx=14, pady=10, relief="solid", borderwidth=1,
+                                 bg="#ffffff")
+        scroll = ttk.Scrollbar(text_frame, orient="vertical",
+                               command=self.help_text.yview)
+        self.help_text.configure(yscrollcommand=scroll.set)
+        self.help_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self.help_text.tag_configure(
+            "h1", font=(BASE_FONT[0], BASE_FONT[1] + 3, "bold"),
+            spacing1=10, spacing3=6)
+        self.help_text.tag_configure("body", spacing1=2, spacing3=2,
+                                     lmargin1=2, lmargin2=2)
+        self.help_text.tag_configure("bullet", lmargin1=18, lmargin2=30, spacing1=2)
+        self.help_text.tag_configure("code", font=MONO, lmargin1=24, lmargin2=24,
+                                     spacing1=2, foreground="#333333")
+
+        for index, (title, body_text) in enumerate(HELP_SECTIONS):
+            self.help_text.mark_set(f"sec{index}", "insert")
+            self.help_text.mark_gravity(f"sec{index}", "left")
+            self.help_text.insert("end", title + "\n", "h1")
+            for line in body_text.strip("\n").splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    self.help_text.insert("end", "\n")
+                elif stripped.startswith(("·", "-", "*")):
+                    self.help_text.insert("end", "  " + stripped + "\n", "bullet")
+                elif line.startswith("  "):
+                    self.help_text.insert("end", line.rstrip() + "\n", "code")
+                else:
+                    self.help_text.insert("end", stripped + "\n", "body")
+            self.help_text.insert("end", "\n")
+        self.help_text.configure(state="disabled")
+
+        actions = ttk.Frame(parent, padding=(10, 0, 10, 8))
+        actions.pack(fill="x")
+        ttk.Button(actions, text="保存使用说明…", command=self.save_help).pack(side="left")
+        ttk.Button(actions, text="关于", command=self.show_about).pack(side="left", padx=6)
+        ttk.Label(actions, text="任意页签按 F1 都能回到这里",
+                  style="Hint.TLabel").pack(side="left", padx=10)
+
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self.root)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="使用说明", accelerator="F1", command=self.show_help)
+        help_menu.add_command(label="关于", command=self.show_about)
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        self.root.configure(menu=menubar)
+
+    def _jump_help(self, _event=None) -> None:
+        selection = self.help_toc.curselection()
+        if not selection:
+            return
+        try:
+            self.help_text.see(f"sec{selection[0]}")
+        except tk.TclError:
+            pass
+
+    def show_help(self) -> None:
+        self.notebook.select(self.tab_help)
+        self.help_text.focus_set()
+
+    def show_about(self) -> None:
+        messagebox.showinfo(
+            "关于",
+            f"{APP_TITLE} {APP_VERSION}\n\n"
+            "从截图识别车牌、按号段批量筛选、按规则打分排序，\n"
+            "并提供数字能量参考。\n\n"
+            "https://github.com/yehuzai/good-car-code",
+            parent=self.root)
+
+    def save_help(self) -> str:
+        path = filedialog.asksaveasfilename(
+            title="保存使用说明", defaultextension=".txt",
+            initialdir=self._last_dir,
+            initialfile=f"车牌筛选工具_使用说明_{APP_VERSION}.txt",
+            filetypes=[("文本", "*.txt"), ("全部文件", "*.*")])
+        if not path:
+            return ""
+        lines = [f"{APP_TITLE} {APP_VERSION} 使用说明", "=" * 40, ""]
+        for title, body_text in HELP_SECTIONS:
+            lines.append(title)
+            lines.append("-" * max(4, _display_width(title)))
+            lines.extend(body_text.strip("\n").splitlines())
+            lines.append("")
+        try:
+            core.write_text(path, "\n".join(lines) + "\n")
+        except OSError as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return ""
+        self._last_dir = os.path.dirname(path) or self._last_dir
+        self.set_status(f"使用说明已保存：{path}")
+        return path
 
     # ------------------------------------------------------------------ #
     # 规则 <-> 界面
@@ -1186,6 +1447,10 @@ def selftest(argv: list[str]) -> int:
 
 def _selftest_body(say, require_bundled: bool) -> int:
     say(f"车牌筛选工具 {APP_VERSION} 自检")
+
+    assert HELP_SECTIONS and all(title and body for title, body in HELP_SECTIONS), \
+        "内置使用说明有空章节"
+    say(f"      内置使用说明：{len(HELP_SECTIONS)} 个章节")
 
     say("[1/6] 规则与打分")
     rules = core.default_rules()

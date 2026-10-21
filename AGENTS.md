@@ -25,6 +25,8 @@
   `~/Documents/perfect-numbers-app` 对齐，改动后要同步 `app.py` 的 `energy_baseline`
   并与那边对数。要参与排序只能通过 `energy.sort_mode = "energy"`。
 - 数字能量属于民俗 / 娱乐参考，界面上不能写成确定性结论。
+- 内置使用说明在 `app.py` 的 `HELP_SECTIONS`（界面上是「使用说明」页签）。
+  改功能、改默认值、加按钮时同步更新对应章节；自检会检查章节非空。
 
 ## 改完必须验证
 
