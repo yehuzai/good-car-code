@@ -26,6 +26,7 @@ from PIL import Image, ImageTk
 import core
 
 APP_TITLE = "车牌筛选工具"
+APP_VERSION = "1.1.0"
 
 if sys.platform == "darwin":
     BASE_FONT = ("PingFang SC", 13)
@@ -89,6 +90,7 @@ class PlateApp:
         self.annotated: np.ndarray | None = None
         self.image_plates: list[core.Plate] = []
         self._plates_by_index: dict[int, core.Plate] = {}
+        self._tree_plate_map: dict[object, dict[str, core.Plate]] = {}
 
         self.segment_numbers: list[str] = []
         self.segment_plates: list[core.Plate] = []
@@ -110,7 +112,7 @@ class PlateApp:
     # ------------------------------------------------------------------ #
 
     def _build_ui(self) -> None:
-        self.root.title(APP_TITLE)
+        self.root.title(f"{APP_TITLE} {APP_VERSION}")
         self.root.geometry("1240x800")
         self.root.minsize(1100, 700)
 
@@ -139,12 +141,15 @@ class PlateApp:
         self.tab_image = ttk.Frame(self.notebook)
         self.tab_segment = ttk.Frame(self.notebook)
         self.tab_rules = ttk.Frame(self.notebook)
+        self.tab_energy = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_image, text="  图片识别  ")
         self.notebook.add(self.tab_segment, text="  号段筛选  ")
+        self.notebook.add(self.tab_energy, text="  数字能量  ")
         self.notebook.add(self.tab_rules, text="  规则与设置  ")
 
         self._build_image_tab()
         self._build_segment_tab()
+        self._build_energy_tab()
         self._build_rules_tab()
 
     # ------------------------------ 页签 1 ------------------------------ #
@@ -176,15 +181,16 @@ class PlateApp:
 
         box = ttk.LabelFrame(right, text="识别结果", padding=6)
         box.pack(fill="both", expand=True)
-        columns = ("rank", "plate", "digits", "score", "hits")
+        columns = ("rank", "plate", "digits", "score", "energy", "hits")
         self.image_tree = ttk.Treeview(box, columns=columns, show="headings",
                                        selectmode="browse")
         for key, text, width, anchor in (
-            ("rank", "序号", 46, "center"),
-            ("plate", "车牌号", 88, "center"),
-            ("digits", "数字", 66, "center"),
-            ("score", "得分", 84, "e"),
-            ("hits", "命中规则", 140, "w"),
+            ("rank", "序号", 44, "center"),
+            ("plate", "车牌号", 84, "center"),
+            ("digits", "数字", 60, "center"),
+            ("score", "得分", 78, "e"),
+            ("energy", "能量", 96, "center"),
+            ("hits", "命中规则", 120, "w"),
         ):
             self.image_tree.heading(key, text=text)
             self.image_tree.column(key, width=width, anchor=anchor,
@@ -270,14 +276,15 @@ class PlateApp:
 
         table = ttk.Frame(result_box)
         table.pack(fill="both", expand=True)
-        columns = ("rank", "plate", "digits", "score", "hits")
+        columns = ("rank", "plate", "digits", "score", "energy", "hits")
         self.segment_tree = ttk.Treeview(table, columns=columns, show="headings")
         for key, text, width, anchor in (
-            ("rank", "排名", 60, "center"),
-            ("plate", "车牌号", 110, "center"),
-            ("digits", "数字", 80, "center"),
-            ("score", "得分", 100, "e"),
-            ("hits", "命中规则", 260, "w"),
+            ("rank", "排名", 50, "center"),
+            ("plate", "车牌号", 96, "center"),
+            ("digits", "数字", 70, "center"),
+            ("score", "得分", 88, "e"),
+            ("energy", "能量", 96, "center"),
+            ("hits", "命中规则", 240, "w"),
         ):
             self.segment_tree.heading(key, text=text)
             self.segment_tree.column(key, width=width, anchor=anchor,
@@ -289,6 +296,14 @@ class PlateApp:
         seg_scroll2.grid(row=0, column=1, sticky="ns")
         table.rowconfigure(0, weight=1)
         table.columnconfigure(0, weight=1)
+        self.segment_tree.bind("<<TreeviewSelect>>", self.on_segment_select)
+
+        detail_box = ttk.LabelFrame(result_box, text="所选号码的数字能量", padding=6)
+        detail_box.pack(fill="x", pady=(6, 0))
+        self.segment_detail_var = tk.StringVar(
+            value="选中一行查看八星 / 五行 / 81 数理详情（在“数字能量”页签可关闭）")
+        ttk.Label(detail_box, textvariable=self.segment_detail_var,
+                  style="Hint.TLabel", wraplength=640, justify="left").pack(anchor="w")
 
         actions = ttk.Frame(parent, padding=(10, 0, 10, 8))
         actions.pack(fill="x")
@@ -299,6 +314,150 @@ class PlateApp:
         ttk.Button(actions, text="导出 CSV", command=self.csv_for_segments).pack(side="left")
 
     # ------------------------------ 页签 3 ------------------------------ #
+
+    def _build_energy_tab(self) -> None:
+        parent = self.tab_energy
+        body = ttk.Frame(parent, padding=10)
+        body.pack(fill="both", expand=True)
+        left = ttk.Frame(body, width=530)
+        right = ttk.Frame(body)
+        left.pack(side="left", fill="both", padx=(0, 10))
+        left.pack_propagate(False)
+        right.pack(side="left", fill="both", expand=True)
+
+        master = ttk.LabelFrame(left, text="开关与排序", padding=8)
+        master.pack(fill="x")
+        self.energy_enabled = tk.BooleanVar(value=True)
+        self.energy_use81 = tk.BooleanVar(value=True)
+        self.energy_wuxing = tk.BooleanVar(value=True)
+        self.energy_tiebreak = tk.BooleanVar(value=True)
+        ttk.Checkbutton(master, text="启用数字能量分析（只作参考，不改变得分）",
+                        variable=self.energy_enabled).pack(anchor="w", pady=2)
+        ttk.Checkbutton(master, text="81 数理参与能量分",
+                        variable=self.energy_use81).pack(anchor="w", pady=2)
+        ttk.Checkbutton(master, text="五行齐全加分",
+                        variable=self.energy_wuxing).pack(anchor="w", pady=2)
+        ttk.Checkbutton(master, text="得分相同时按能量分排序",
+                        variable=self.energy_tiebreak).pack(anchor="w", pady=2)
+        row = ttk.Frame(master)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Label(row, text="排序依据：").pack(side="left")
+        self.energy_sort_mode = tk.StringVar(value="规则得分")
+        ttk.Combobox(row, textvariable=self.energy_sort_mode, state="readonly",
+                     width=10, values=["规则得分", "能量分"]).pack(side="left")
+
+        stars_box = ttk.LabelFrame(left, text="八星权重（只影响能量分）", padding=8)
+        stars_box.pack(fill="x", pady=(10, 0))
+        self.energy_star_vars: dict[str, tk.BooleanVar] = {}
+        self.energy_star_weights: dict[str, tk.StringVar] = {}
+        for index, star in enumerate(core.STAR_ORDER):
+            row, column = index % 4, (index // 4) * 2
+            variable = tk.BooleanVar(value=True)
+            weight = tk.StringVar(value=str(core.STAR_LUCK[star]))
+            self.energy_star_vars[star] = variable
+            self.energy_star_weights[star] = weight
+            ttk.Checkbutton(stars_box, text=star, variable=variable).grid(
+                row=row, column=column, sticky="w", pady=2)
+            ttk.Entry(stars_box, textvariable=weight, width=5).grid(
+                row=row, column=column + 1, sticky="w", padx=(0, 14))
+
+        owner_box = ttk.LabelFrame(left, text="车主信息（可选）", padding=8)
+        owner_box.pack(fill="x", pady=(10, 0))
+        row = ttk.Frame(owner_box)
+        row.pack(fill="x")
+        ttk.Label(row, text="生日：").pack(side="left")
+        self.owner_birthday = tk.StringVar(value="")
+        entry = ttk.Entry(row, textvariable=self.owner_birthday, width=14)
+        entry.pack(side="left")
+        entry.bind("<KeyRelease>", lambda _event: self._update_owner_info())
+        ttk.Label(row, text="YYYY-MM-DD（可省略）", style="Hint.TLabel").pack(
+            side="left", padx=6)
+        self.owner_info_var = tk.StringVar(value="未填写：不计算与车主的五行匹配")
+        ttk.Label(owner_box, textvariable=self.owner_info_var,
+                  style="Hint.TLabel").pack(anchor="w", pady=(6, 0))
+
+        trial = ttk.LabelFrame(right, text="试算一个号码", padding=8)
+        trial.pack(fill="both", expand=True)
+        row = ttk.Frame(trial)
+        row.pack(fill="x")
+        ttk.Label(row, text="车牌 / 号码：").pack(side="left")
+        self.trial_var = tk.StringVar(value="FU5N88")
+        entry = ttk.Entry(row, textvariable=self.trial_var, width=16)
+        entry.pack(side="left")
+        entry.bind("<Return>", lambda _event: self.run_trial())
+        ttk.Button(row, text="分析", command=self.run_trial).pack(side="left", padx=6)
+        self.trial_text = tk.Text(trial, height=14, width=38, wrap="word", font=BASE_FONT,
+                                  bg="#fbfbfb", relief="solid", borderwidth=1)
+        self.trial_text.pack(fill="both", expand=True, pady=(8, 0))
+
+        note = ttk.LabelFrame(right, text="说明", padding=8)
+        note.pack(fill="x", pady=(10, 0))
+        ttk.Label(
+            note, style="Hint.TLabel", justify="left", wraplength=520,
+            text=("口径：八星磁场（相邻两位数字，含 0 视为无星）+ 81 数理（各位数字和）"
+                  "+ 河图五行（1/6 水、2/7 火、3/8 木、4/9 金、5/0 土）。"
+                  "字母不参与组合。属民俗 / 娱乐参考，不是科学结论；"
+                  "开启「按能量分排序」后，列表会优先按能量分排列。"),
+        ).pack(anchor="w")
+
+        actions = ttk.Frame(parent, padding=(10, 0, 10, 8))
+        actions.pack(fill="x")
+        ttk.Button(actions, text="应用并重新计算", command=self.apply_rules).pack(side="left")
+        self.energy_summary_var = tk.StringVar(value="")
+        ttk.Label(actions, textvariable=self.energy_summary_var,
+                  style="Hint.TLabel").pack(side="left", padx=10)
+
+    def _update_owner_info(self) -> None:
+        text = self.owner_birthday.get().strip()
+        if not text:
+            self.owner_info_var.set("未填写：不计算与车主的五行匹配")
+            return
+        parsed = core.parse_birthday(text)
+        if not parsed:
+            self.owner_info_var.set("生日格式无法识别（用 1990-05-20 或 19900520）")
+            return
+        year, month, day = parsed
+        gan, zhi = core.day_pillar(year, month, day)
+        zodiac = core.zodiac_of(year)
+        self.owner_info_var.set(
+            f"生肖{zodiac}（{core.ZODIAC_WUXING[zodiac]}）· 日柱{gan}{zhi} · "
+            f"日主{core.GAN_WUXING[gan]}")
+
+    def run_trial(self) -> None:
+        text = self.trial_var.get().strip()
+        if not text:
+            return
+        try:
+            self._apply_ui_to_rules()
+        except ValueError as exc:
+            messagebox.showerror("规则不合法", str(exc))
+            return
+        self._update_owner_info()
+        plate = core.make_plate(1, text, self.rules)
+        lines = [f"号码：{plate.text}（数字部分 {plate.digits or '-'}）",
+                 f"规则得分：{plate.price}（{core.format_price(plate.price)}）",
+                 f"命中：{'、'.join(plate.hits) or '无'}",
+                 ""]
+        energy = plate.energy
+        if energy:
+            lines.append(f"数字能量：{energy['score']} 分（{energy['grade']}）")
+            lines.append(core.format_energy_detail(energy))
+            lines.append("")
+            lines.extend("· " + note for note in energy["notes"])
+        else:
+            lines.append("数字能量分析未启用")
+        self.trial_text.delete("1.0", "end")
+        self.trial_text.insert("1.0", "\n".join(lines))
+
+    def _energy_summary(self) -> str:
+        energy = self.rules["energy"]
+        if not energy.get("enabled"):
+            return "数字能量：关"
+        mode = "按能量分排序" if energy.get("sort_mode") == "energy" else "按规则得分排序"
+        owner = "，含车主匹配" if energy.get("owner_birthday") else ""
+        return f"数字能量：开（{mode}{owner}）"
+
+    # ------------------------------ 页签 4 ------------------------------ #
 
     def _build_rules_tab(self) -> None:
         parent = self.tab_rules
@@ -408,13 +567,29 @@ class PlateApp:
         self.pattern_var.set(str(detect.get("pattern", r"[A-Z0-9]{5,7}")))
         self.whitelist_var.set(str(detect.get("whitelist", "")))
         self.tesseract_var.set(str(detect.get("tesseract_cmd", "")))
+        energy = rules["energy"]
+        self.energy_enabled.set(bool(energy.get("enabled", True)))
+        self.energy_use81.set(bool(energy.get("use_81", True)))
+        self.energy_wuxing.set(bool(energy.get("wuxing_bonus", True)))
+        self.energy_tiebreak.set(bool(energy.get("tie_break_energy", True)))
+        self.energy_sort_mode.set(
+            "能量分" if energy.get("sort_mode") == "energy" else "规则得分")
+        for star, variable in self.energy_star_vars.items():
+            config = (energy.get("stars") or {}).get(star) or {}
+            variable.set(bool(config.get("enabled", True)))
+            self.energy_star_weights[star].set(
+                str(config.get("weight", core.STAR_LUCK[star])))
+        self.owner_birthday.set(str(energy.get("owner_birthday", "")))
+        self._update_owner_info()
         self.rules_summary_var.set(self._rules_summary())
+        self.energy_summary_var.set(self._energy_summary())
 
     def _rules_summary(self) -> str:
         rules = self.rules
         enabled = sum(1 for v in rules["flags"].values() if v)
-        return (f"已启用 {enabled}/6 条规则，幸运字符 {len(rules['lucky_chars'])} 个，"
-                f"忌讳字符 {len(rules['unlucky_chars'])} 个")
+        energy = "开" if rules["energy"].get("enabled") else "关"
+        return (f"{enabled}/6 规则 · 幸运 {len(rules['lucky_chars'])} · "
+                f"忌讳 {len(rules['unlucky_chars'])} · 能量{energy}")
 
     def _text_lines(self, widget: tk.Text) -> list[str]:
         raw = widget.get("1.0", "end").splitlines()
@@ -439,6 +614,21 @@ class PlateApp:
             "pattern": self.pattern_var.get().strip() or r"[A-Z0-9]{5,7}",
             "tesseract_cmd": self.tesseract_var.get().strip(),
         }
+        rules["energy"] = {
+            "enabled": bool(self.energy_enabled.get()),
+            "use_81": bool(self.energy_use81.get()),
+            "wuxing_bonus": bool(self.energy_wuxing.get()),
+            "tie_break_energy": bool(self.energy_tiebreak.get()),
+            "sort_mode": "energy" if self.energy_sort_mode.get() == "能量分" else "score",
+            "owner_birthday": self.owner_birthday.get().strip(),
+            "stars": {},
+        }
+        for star, variable in self.energy_star_vars.items():
+            weight_text = self.energy_star_weights[star].get().strip()
+            rules["energy"]["stars"][star] = {
+                "enabled": bool(variable.get()),
+                "weight": core.parse_weight(weight_text, core.STAR_LUCK[star]),
+            }
         self.rules = core.normalize_rules(rules)
 
     def apply_rules(self) -> None:
@@ -448,7 +638,23 @@ class PlateApp:
             messagebox.showerror("规则不合法", str(exc))
             return
         self.rules_summary_var.set(self._rules_summary())
-        self.set_status("规则已应用（对下一次识别/评估生效）")
+        self.energy_summary_var.set(self._energy_summary())
+        self._update_owner_info()
+        updated = []
+        if self.image_plates:
+            self.image_plates = core.rescore(self.image_plates, self.rules)
+            self.annotated = core.annotate_image(self.image, self.image_plates)
+            self._fill_tree(self.image_tree, self.image_plates)
+            self.render_preview()
+            updated.append("图片结果")
+        if self.segment_plates:
+            self.segment_plates = core.rescore(self.segment_plates, self.rules)
+            self.refresh_segment_tree()
+            updated.append("号段结果")
+        if updated:
+            self.set_status(f"规则已应用，已重新计算：{'、'.join(updated)}")
+        else:
+            self.set_status("规则已应用（对下一次识别/评估生效）")
 
     def reset_rules(self) -> None:
         if not messagebox.askyesno("恢复默认", "确定把当前规则恢复成默认值？"):
@@ -594,7 +800,7 @@ class PlateApp:
         canvas.delete("all")
         if not selection or self.image is None:
             return
-        plate = self._plates_by_index.get(int(selection[0]))
+        plate = self._tree_plate_map.get(self.image_tree, {}).get(selection[0])
         if plate is None or not plate.box:
             return
         try:
@@ -608,8 +814,10 @@ class PlateApp:
             Image.fromarray(core.bgr_to_rgb(fitted)))
         canvas.create_image(canvas.winfo_width() / 2, canvas.winfo_height() / 2,
                             image=self._zoom_photo)
-        canvas.create_text(8, 8, anchor="nw", fill="#dddddd",
-                           text=f"{plate.text}  得分 {core.format_price(plate.price)}")
+        canvas.create_text(
+            8, 8, anchor="nw", fill="#dddddd",
+            text=(f"{plate.text}  得分 {core.format_price(plate.price)}"
+                  f"  能量 {core.format_energy(plate.energy)}"))
 
     def render_preview(self) -> None:
         canvas = self.preview_canvas
@@ -670,6 +878,7 @@ class PlateApp:
             extra_lines=[f"图片尺寸：{self.image.shape[1]}x{self.image.shape[0]}"]
             if self.image is not None else (),
             top_n=10,
+            rules=self.rules,
         )
         self.show_report_window(text, core.suggest_name("车牌报告_识别"))
 
@@ -759,6 +968,22 @@ class PlateApp:
         else:
             self.segment_summary_var.set("尚未评估")
 
+    def on_segment_select(self, _event=None) -> None:
+        selection = self.segment_tree.selection()
+        if not selection:
+            self.segment_detail_var.set(
+                "选中一行查看八星 / 五行 / 81 数理详情（在“数字能量”页签可关闭）")
+            return
+        plate = self._tree_plate_map.get(self.segment_tree, {}).get(selection[0])
+        if plate is None:
+            return
+        if not plate.energy:
+            self.segment_detail_var.set(f"{plate.text}：数字能量分析未启用")
+            return
+        detail = core.format_energy_detail(plate.energy)
+        first_note = plate.energy["notes"][0] if plate.energy["notes"] else ""
+        self.segment_detail_var.set(f"{plate.text} ｜ {detail}\n{first_note}")
+
     def report_for_segments(self) -> None:
         if not self.segment_plates:
             messagebox.showinfo("提示", "还没有评估结果")
@@ -773,6 +998,7 @@ class PlateApp:
             [f"  {line.strip()}" for line in
              self.segment_text.get("1.0", "end").splitlines() if line.strip()],
             top_n=20,
+            rules=self.rules,
         )
         self.show_report_window(text, core.suggest_name("车牌报告_号段"))
 
@@ -795,16 +1021,21 @@ class PlateApp:
 
     def _fill_tree(self, tree: ttk.Treeview, plates, limit=None) -> None:
         tree.delete(*tree.get_children())
-        ordered = core.sort_plates(plates)
+        ordered = core.sort_plates(plates, core.sort_mode(self.rules))
         if limit is not None:
             ordered = ordered[:limit]
+        mapping: dict[str, core.Plate] = {}
         for rank, plate in enumerate(ordered, start=1):
             hits = "、".join(plate.hits)
-            if len(hits) > 46:
-                hits = hits[:46] + "…"
+            if len(hits) > 40:
+                hits = hits[:40] + "…"
+            item = str(plate.index)
+            mapping[item] = plate
             tree.insert("", "end", iid=str(plate.index),
                         values=(rank, plate.text, plate.digits or "-",
-                                core.format_price(plate.price), hits or "-"))
+                                core.format_price(plate.price),
+                                core.format_energy(plate.energy), hits or "-"))
+        self._tree_plate_map[tree] = mapping
 
     def _save_csv(self, plates, prefix: str) -> None:
         path = filedialog.asksaveasfilename(
@@ -814,7 +1045,7 @@ class PlateApp:
         if not path:
             return
         try:
-            core.write_csv(path, plates)
+            core.write_csv(path, plates, core.sort_mode(self.rules))
         except Exception as exc:
             messagebox.showerror("导出失败", str(exc))
             return
@@ -954,9 +1185,9 @@ def selftest(argv: list[str]) -> int:
 
 
 def _selftest_body(say, require_bundled: bool) -> int:
-    say("车牌筛选工具 自检")
+    say(f"车牌筛选工具 {APP_VERSION} 自检")
 
-    say("[1/5] 规则与打分")
+    say("[1/6] 规则与打分")
     rules = core.default_rules()
     baseline = {"FU5N88": 190_000_000, "FR0H68": 200_000_000,
                 "FX8X00": 199_000_000, "FU5N05": -11_000_000}
@@ -966,22 +1197,48 @@ def _selftest_body(say, require_bundled: bool) -> int:
         say(f"      {text} -> {core.format_price(price)}"
             f"（{'、'.join(hits) if hits else '无命中'}）")
 
-    say("[2/5] 号段展开")
+    say("[2/6] 数字能量（八星 / 81 数理 / 五行）")
+    # 与 perfect-numbers-app 的 core.py 对过：同口径下分数完全一致
+    energy_baseline = {
+        "588": (69, "中平", 1, 0, 21, "吉"),
+        "1313": (77, "偏吉", 3, 0, 8, "吉"),
+        "88888": (51, "偏凶", 4, 0, 40, "凶"),
+    }
+    for text, (score, grade, good, bad, n81, luck81) in energy_baseline.items():
+        energy = core.energy_analysis(text, rules)
+        assert energy["score"] == score, f"{text} 能量分 {energy['score']}，期望 {score}"
+        assert energy["grade"] == grade, f"{text} 等级 {energy['grade']}，期望 {grade}"
+        assert (energy["good"], energy["bad"]) == (good, bad), f"{text} 吉凶组数不符"
+        assert (energy["n81"], energy["luck81"]) == (n81, luck81), f"{text} 81 数理不符"
+        say(f"      {text} -> {energy['score']} 分（{grade}），"
+            f"吉 {good} / 凶 {bad}，81 数理 {n81}{luck81}")
+    disabled = core.default_rules()
+    disabled["energy"]["enabled"] = False
+    assert core.energy_analysis("588", disabled) is None, "关闭后不应返回能量结果"
+    say("      关闭开关后不计算：ok")
+
+    say("[3/6] 号段展开")
     numbers = core.expand_segments(["# 注释行", "FU5N00-FU5N03", "FR0H98-FR0H99"])
     assert numbers == ["FU5N00", "FU5N01", "FU5N02", "FU5N03", "FR0H98", "FR0H99"], numbers
     ranked = core.build_plates(numbers, rules)
     assert ranked and ranked[0].price >= ranked[-1].price
+    by_energy = core.build_plates(numbers, {**rules,
+                                            "energy": {**rules["energy"],
+                                                       "sort_mode": "energy"}})
+    assert by_energy[0].energy["score"] >= by_energy[-1].energy["score"]
     say(f"      {len(numbers)} 个号码，最佳 {ranked[0].text}"
         f"（{core.format_price(ranked[0].price)}）")
+    say(f"      按能量排序最佳 {by_energy[0].text}"
+        f"（{by_energy[0].energy['score']} 分）")
 
-    say("[3/5] tesseract")
+    say("[4/6] tesseract")
     exe, source = core.configure_tesseract(bundled_only=require_bundled)
     say(f"      {exe}（来源：{source}）")
     if core.tessdata_dir():
         say(f"      tessdata：{core.tessdata_dir()}")
     say(f"      版本：{core.tesseract_version(exe)}")
 
-    say("[4/5] OCR 识别")
+    say("[5/6] OCR 识别")
     params = core.DetectParams.from_rules(rules)
     sample = core.make_sample_plate_image("FU5N88")
     text = core.ocr_crop(sample, params)
@@ -992,11 +1249,13 @@ def _selftest_body(say, require_bundled: bool) -> int:
     assert annotated.shape == sample.shape, "标注图尺寸不对"
     assert plates, "合成样本上没识别到任何号码"
 
-    say("[5/5] 文本报告")
+    say("[6/6] 文本报告")
     out_dir = tempfile.mkdtemp(prefix="plate_selftest_")
     text_path = os.path.join(out_dir, "report.txt")
     csv_path = os.path.join(out_dir, "plates.csv")
-    core.write_text(text_path, core.build_report("自检报告", "合成样本", ranked))
+    report_text = core.build_report("自检报告", "合成样本", ranked, rules=rules)
+    assert "【数字能量参考" in report_text, "报告里没有数字能量段落"
+    core.write_text(text_path, report_text)
     core.write_csv(csv_path, ranked)
     for path in (text_path, csv_path):
         assert os.path.getsize(path) > 0, f"{path} 是空文件"

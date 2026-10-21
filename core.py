@@ -65,6 +65,65 @@ _BAD_TAIL = ["0", "05"]
 
 FLAG_KEYS = ("repeat", "sequence", "pair", "lucky", "unlucky", "bad_tail")
 
+# ---- 数字能量规则表 -------------------------------------------------------- #
+# 口径取自本机 ~/Documents/perfect-numbers-app 的 core.py（常见数字能量流派）：
+# 相邻两位数字 -> 八星磁场，各位数之和 -> 81 数理，数字 -> 河图五行。
+# 属于民俗 / 娱乐参考，不是科学结论；不同流派的分值可以在这里直接替换。
+
+STAR_TABLE = {
+    "天医": "13 31 68 86 49 94 27 72",
+    "延年": "19 91 78 87 34 43 26 62",
+    "生气": "14 41 67 76 39 93 28 82",
+    "伏位": "11 22 88 99 66 77 33 44",
+    "绝命": "12 21 69 96 48 84 37 73",
+    "五鬼": "18 81 79 97 36 63 24 42",
+    "六煞": "16 61 47 74 38 83 29 92",
+    "祸害": "17 71 89 98 46 64 23 32",
+}
+STAR_LUCK = {
+    "天医": 1, "延年": 1, "生气": 1, "伏位": 1,
+    "绝命": -1, "五鬼": -1, "六煞": -1, "祸害": -1,
+}
+STAR_ORDER = ("天医", "延年", "生气", "伏位", "绝命", "五鬼", "六煞", "祸害")
+PAIR_STAR = {pair: star for star, pairs in STAR_TABLE.items()
+             for pair in pairs.split()}
+
+# 河图数：天一生水、地六成之……
+DIGIT_WUXING = {"1": "水", "6": "水", "2": "火", "7": "火", "3": "木",
+                "8": "木", "4": "金", "9": "金", "5": "土", "0": "土"}
+WUXING_ORDER = ("金", "木", "水", "火", "土")
+
+# 五行生克：SHENG[我] = 我生；KE[我] = 我克
+SHENG = {"木": "火", "火": "土", "土": "金", "金": "水", "水": "木"}
+KE = {"木": "土", "土": "水", "水": "火", "火": "金", "金": "木"}
+
+# 81 数理吉凶（常见版本，可替换）
+LUCK81 = {
+    1: "吉", 2: "凶", 3: "吉", 4: "凶", 5: "吉", 6: "吉", 7: "吉", 8: "吉",
+    9: "凶", 10: "凶", 11: "吉", 12: "凶", 13: "吉", 14: "凶", 15: "吉",
+    16: "吉", 17: "吉", 18: "吉", 19: "凶", 20: "凶", 21: "吉", 22: "凶",
+    23: "吉", 24: "吉", 25: "吉", 26: "凶", 27: "半吉", 28: "凶", 29: "吉",
+    30: "半吉", 31: "吉", 32: "吉", 33: "吉", 34: "凶", 35: "吉", 36: "凶",
+    37: "吉", 38: "半吉", 39: "吉", 40: "凶", 41: "吉", 42: "凶", 43: "凶",
+    44: "凶", 45: "吉", 46: "凶", 47: "吉", 48: "吉", 49: "凶", 50: "凶",
+    51: "半吉", 52: "吉", 53: "凶", 54: "凶", 55: "半吉", 56: "凶", 57: "吉",
+    58: "半吉", 59: "凶", 60: "凶", 61: "吉", 62: "凶", 63: "吉", 64: "凶",
+    65: "吉", 66: "凶", 67: "吉", 68: "吉", 69: "凶", 70: "凶", 71: "半吉",
+    72: "凶", 73: "吉", 74: "凶", 75: "半吉", 76: "凶", 77: "半吉", 78: "半吉",
+    79: "凶", 80: "凶", 81: "吉",
+}
+LUCK81_SCORE = {"吉": 1, "半吉": 0, "凶": -1}
+
+# 车主生日 -> 日柱天干 / 生肖（只看年份和日期，不排完整八字）
+GAN = "甲乙丙丁戊己庚辛壬癸"
+ZHI = "子丑寅卯辰巳午未申酉戌亥"
+GAN_WUXING = {"甲": "木", "乙": "木", "丙": "火", "丁": "火", "戊": "土",
+              "己": "土", "庚": "金", "辛": "金", "壬": "水", "癸": "水"}
+ZODIAC = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
+ZODIAC_WUXING = {"鼠": "水", "牛": "土", "虎": "木", "兔": "木", "龙": "土",
+                 "蛇": "火", "马": "火", "羊": "土", "猴": "金", "鸡": "金",
+                 "狗": "土", "猪": "水"}
+
 
 def _dedup(items: Iterable[str]) -> list[str]:
     """去重并保持原顺序，忽略空项。"""
@@ -110,6 +169,18 @@ def default_rules() -> dict:
             "pattern": r"[A-Z0-9]{5,7}",
             "tesseract_cmd": "",
         },
+        # 数字能量（八星磁场 / 81 数理 / 河图五行）。
+        # 只做参考展示，默认不改变“得分”；需要时把 sort_mode 改成 energy。
+        "energy": {
+            "enabled": True,
+            "use_81": True,
+            "wuxing_bonus": True,
+            "tie_break_energy": True,   # 得分相同时，能量分高的排前面
+            "sort_mode": "score",       # score = 按得分，energy = 按能量分
+            "owner_birthday": "",       # 可选，YYYY-MM-DD，用来看与车主的五行匹配
+            "stars": {name: {"enabled": True, "weight": STAR_LUCK[name]}
+                      for name in STAR_ORDER},
+        },
     }
 
 
@@ -122,6 +193,17 @@ def normalize_rules(raw: dict | None) -> dict:
         incoming = raw.get(section) or {}
         if isinstance(incoming, dict):
             rules[section].update(incoming)
+    incoming_energy = raw.get("energy") or {}
+    if isinstance(incoming_energy, dict):
+        for key, value in incoming_energy.items():
+            if key == "stars" and isinstance(value, dict):
+                for star, star_cfg in value.items():
+                    if star in rules["energy"]["stars"] and isinstance(star_cfg, dict):
+                        rules["energy"]["stars"][star].update(star_cfg)
+            elif key in rules["energy"]:
+                rules["energy"][key] = value
+    if rules["energy"].get("sort_mode") not in ("score", "energy"):
+        rules["energy"]["sort_mode"] = "score"
     for key in ("lucky_chars", "unlucky_chars", "bad_tail"):
         if raw.get(key):
             rules[key] = _dedup(raw[key])
@@ -194,6 +276,7 @@ class Plate:
     price: int = 0
     hits: list[str] = field(default_factory=list)
     box: tuple[int, int, int, int] | None = None
+    energy: dict | None = None
 
     @property
     def source(self) -> str:
@@ -260,22 +343,33 @@ def score_plate(plate_text: str, rules: dict | None = None) -> tuple[int, list[s
 
 def make_plate(index: int, text: str, rules: dict | None = None,
                box: tuple[int, int, int, int] | None = None) -> Plate:
+    rules = rules or default_rules()
     text = str(text).strip().upper()
     digits, letters = extract_number_from_plate(text)
     price, hits = score_plate(text, rules)
     return Plate(index=index, text=text, digits=digits, letters=letters,
-                 price=price, hits=hits, box=box)
+                 price=price, hits=hits, box=box,
+                 energy=energy_analysis(text, rules))
 
 
-def sort_plates(plates: Sequence[Plate]) -> list[Plate]:
-    """按得分降序，同分按号码升序（同分顺序稳定）。"""
-    return sorted(plates, key=lambda plate: (-plate.price, plate.text))
+def sort_plates(plates: Sequence[Plate], mode: str = "score") -> list[Plate]:
+    """排序。
+
+    mode="score"：得分降序，同分时能量分高的优先（未启用则按号码）。
+    mode="energy"：能量分降序，再看得分。
+    """
+    if mode == "energy":
+        return sorted(plates, key=lambda plate: (
+            -(plate.energy or {}).get("score", 0), -plate.price, plate.text))
+    return sorted(plates, key=lambda plate: (
+        -plate.price, -(plate.energy or {}).get("score", 0), plate.text))
 
 
 def build_plates(numbers: Iterable[str], rules: dict | None = None) -> list[Plate]:
     """给一批号码编号并估值。"""
+    rules = rules or default_rules()
     return sort_plates([make_plate(i + 1, text, rules)
-                        for i, text in enumerate(numbers)])
+                        for i, text in enumerate(numbers)], sort_mode(rules))
 
 
 # --------------------------------------------------------------------------- #
@@ -332,6 +426,206 @@ def expand_segments(lines: Iterable[str]) -> list[str]:
                 seen.add(number)
                 numbers.append(number)
     return numbers
+
+
+# --------------------------------------------------------------------------- #
+# 数字能量分析（八星磁场 / 81 数理 / 河图五行 / 车主匹配）
+# --------------------------------------------------------------------------- #
+
+
+def parse_birthday(text: str):
+    """接受 1990-05-20 / 1990/5/20 / 19900520，非法返回 None。"""
+    digits = "".join(ch for ch in str(text or "") if ch.isdigit())
+    if len(digits) != 8:
+        return None
+    year, month, day = int(digits[:4]), int(digits[4:6]), int(digits[6:8])
+    if not (1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return year, month, day
+
+
+def day_pillar(year: int, month: int, day: int) -> tuple[str, str]:
+    """公历 -> 日柱天干地支。锚点：1949-10-01 为甲子日。"""
+    a = (14 - month) // 12
+    yy = year + 4800 - a
+    mm = month + 12 * a - 3
+    jdn = day + (153 * mm + 2) // 5 + 365 * yy + yy // 4 - yy // 100 + yy // 400 - 32045
+    index = (jdn + 49) % 60
+    return GAN[index % 10], ZHI[index % 12]
+
+
+def zodiac_of(year: int) -> str:
+    return ZODIAC[(year - 4) % 12]
+
+
+def energy_analysis(plate_text: str, rules: dict | None = None):
+    """算一块车牌的数字能量，返回 dict；未启用时返回 None。
+
+    只分析数字部分（字母不参与八星组合），与「数字能量学」常见口径一致。
+    """
+    rules = rules or default_rules()
+    config = rules.get("energy") or {}
+    if not config.get("enabled", True):
+        return None
+
+    digits, _letters = extract_number_from_plate(plate_text)
+    if not digits:
+        return None
+
+    star_config = config.get("stars") or {}
+    pairs: list[tuple[str, str]] = []
+    star_score = 0
+    counts: dict[str, int] = {}
+
+    for i in range(len(digits) - 1):
+        pair = digits[i:i + 2]
+        star = PAIR_STAR.get(pair)
+        pairs.append((pair, star or ("0" if "0" in pair else "—")))
+        if not star:
+            continue
+        item = star_config.get(star) or {}
+        if item.get("enabled", True):
+            star_score += int(item.get("weight", STAR_LUCK[star]))
+            counts[star] = counts.get(star, 0) + 1
+
+    good = sum(n for star, n in counts.items() if STAR_LUCK[star] > 0)
+    bad = sum(n for star, n in counts.items() if STAR_LUCK[star] < 0)
+
+    wuxing = {name: 0 for name in WUXING_ORDER}
+    for digit in digits:
+        element = DIGIT_WUXING[digit]
+        wuxing[element] += 1
+    missing = [name for name in WUXING_ORDER if wuxing[name] == 0]
+
+    digit_sum = sum(int(digit) for digit in digits)
+    number81 = digit_sum
+    while number81 > 81:
+        number81 -= 80
+    luck81 = LUCK81.get(number81, "—")
+
+    score = 50 + star_score * 4
+    if config.get("use_81", True):
+        score += LUCK81_SCORE.get(luck81, 0) * 15
+    if config.get("wuxing_bonus", True):
+        score += (2 - min(len(missing), 2)) * 2
+
+    owner = None
+    match_score = 0
+    birthday = str(config.get("owner_birthday") or "").strip()
+    parsed = parse_birthday(birthday) if birthday else None
+    if parsed:
+        year, month, day = parsed
+        gan, zhi = day_pillar(year, month, day)
+        zodiac = zodiac_of(year)
+        master = GAN_WUXING[gan]
+        sheng_me = next(name for name, child in SHENG.items() if child == master)
+        ke_me = next(name for name, target in KE.items() if target == master)
+        help_n = wuxing[sheng_me] + wuxing[master]
+        harm_n = wuxing[ke_me]
+        match_score = max(-15, min(15, (help_n - harm_n) * 3))
+        score += match_score
+        owner = {
+            "birthday": "%04d-%02d-%02d" % (year, month, day),
+            "zodiac": zodiac,
+            "zodiac_wx": ZODIAC_WUXING[zodiac],
+            "day_pillar": gan + zhi,
+            "master": master,
+            "help": help_n,
+            "harm": harm_n,
+            "sheng_me": sheng_me,
+            "ke_me": ke_me,
+            "match_score": match_score,
+        }
+
+    score = max(0, min(100, score))
+    grade = "偏吉" if score >= 75 else ("中平" if score >= 55 else "偏凶")
+
+    notes: list[str] = []
+    if pairs:
+        notes.append("相邻组合：" + "、".join(f"{pair}→{star}" for pair, star in pairs))
+    if counts:
+        good_text = "、".join(f"{star}×{n}" for star, n in counts.items()
+                              if STAR_LUCK[star] > 0)
+        bad_text = "、".join(f"{star}×{n}" for star, n in counts.items()
+                             if STAR_LUCK[star] < 0)
+        parts = ([f"吉星 {good_text}"] if good_text else []) + \
+                ([f"凶星 {bad_text}"] if bad_text else [])
+        notes.append("；".join(parts) + f"（吉 {good} 组 / 凶 {bad} 组）")
+        if bad and not good:
+            notes.append("只有凶星，按这套口径能量偏消耗。")
+        elif bad > good:
+            notes.append("凶星多于吉星，按这套口径能量偏消耗。")
+        elif good > bad:
+            notes.append("吉星多于凶星，按这套口径能量偏助益。")
+    notes.append(f"81 数理：各位和 {digit_sum} → {number81}，判为「{luck81}」。")
+    present = "、".join(f"{name}{n}" for name, n in wuxing.items() if n)
+    notes.append("五行：" + (present or "无")
+                 + ("；缺 " + "、".join(missing) if missing else "；五行齐全"))
+    if owner:
+        notes.append(f"车主：生肖{owner['zodiac']}（{owner['zodiac_wx']}），"
+                     f"日柱{owner['day_pillar']}，日主{owner['master']}。")
+        if match_score > 0:
+            notes.append(f"号码里「{owner['sheng_me']}(生你)+{owner['master']}(同你)」"
+                         f"多于「{owner['ke_me']}(克你)」，对日主有助益。")
+        elif match_score < 0:
+            notes.append(f"号码里「{owner['ke_me']}(克你)」偏多，对日主稍有消耗。")
+        else:
+            notes.append("号码五行与日主的生克基本持平。")
+        if wuxing[owner["zodiac_wx"]] >= 2:
+            notes.append(f"生肖属{owner['zodiac_wx']}，号码中{owner['zodiac_wx']}较多，"
+                         f"与生肖相合。")
+
+    return {
+        "digits": digits,
+        "pairs": pairs,
+        "star_counts": counts,
+        "star_score": star_score,
+        "good": good,
+        "bad": bad,
+        "wuxing": wuxing,
+        "missing": missing,
+        "digit_sum": digit_sum,
+        "n81": number81,
+        "luck81": luck81,
+        "owner": owner,
+        "match_score": match_score,
+        "score": score,
+        "grade": grade,
+        "notes": notes,
+    }
+
+
+def format_energy(energy: dict | None) -> str:
+    """表格里用的紧凑写法：62分·吉2凶1。"""
+    if not energy:
+        return "-"
+    return f"{energy['score']}分·吉{energy['good']}凶{energy['bad']}"
+
+
+def format_energy_detail(energy: dict | None) -> str:
+    """详情面板用的完整一行。"""
+    if not energy:
+        return "数字能量分析未启用"
+    pairs = "、".join(f"{pair}→{star}" for pair, star in energy["pairs"]) or "无相邻数字"
+    missing = "、".join(energy["missing"]) or "无"
+    text = (f"八星 {pairs} ｜ 五行 " +
+            "、".join(f"{name}{n}" for name, n in energy["wuxing"].items() if n) +
+            f"（缺 {missing}）｜ 81 数理 {energy['digit_sum']}→{energy['n81']}"
+            f"{energy['luck81']} ｜ 能量 {energy['score']} 分（{energy['grade']}）")
+    if energy.get("owner"):
+        text += f" ｜ 车主日主{energy['owner']['master']}"
+    return text
+
+
+def sort_mode(rules: dict | None) -> str:
+    return ((rules or {}).get("energy") or {}).get("sort_mode", "score")
+
+
+def rescore(plates: Sequence[Plate], rules: dict | None = None) -> list[Plate]:
+    """规则变了以后，用原有号码重新算分（不需要重新 OCR）。"""
+    rules = rules or default_rules()
+    return sort_plates([make_plate(plate.index, plate.text, rules, plate.box)
+                        for plate in plates], sort_mode(rules))
 
 
 # --------------------------------------------------------------------------- #
@@ -642,10 +936,11 @@ def _format_hits(hits: Sequence[str], limit: int = 6) -> str:
 
 
 def build_report(title: str, source: str, plates: Sequence[Plate],
-                 extra_lines: Sequence[str] = (), top_n: int = 10) -> str:
+                 extra_lines: Sequence[str] = (), top_n: int = 10,
+                 rules: dict | None = None) -> str:
     """生成文本报告。"""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ranked = sort_plates(plates)
+    ranked = sort_plates(plates, sort_mode(rules))
 
     lines: list[str] = [LINE, title, LINE]
     lines.append(f"生成时间：{now}")
@@ -661,13 +956,21 @@ def build_report(title: str, source: str, plates: Sequence[Plate],
         lines.append(f"正分号码数：{sum(1 for price in prices if price > 0)}")
 
     lines.append("")
-    lines.append("【全部结果（按得分降序）】")
+    order_text = "按能量分降序" if sort_mode(rules) == "energy" else "按得分降序"
+    lines.append(f"【全部结果（{order_text}）】")
     lines.append(THIN)
-    lines.append(f"{'排名':>4}  {'车牌号':<10} {'数字':<8} {'得分':>12}  命中规则")
+    show_energy = any(plate.energy for plate in ranked)
+    header = f"{'排名':>4}  {'车牌号':<10} {'数字':<8} {'得分':>12}"
+    if show_energy:
+        header += f" {'能量':>8}"
+    lines.append(header + "  命中规则")
     lines.append(THIN)
     for rank, plate in enumerate(ranked, start=1):
-        lines.append(f"{rank:>4}  {plate.text:<10} {plate.digits or '-':<8} "
-                     f"{format_price(plate.price):>12}  {_format_hits(plate.hits)}")
+        row = (f"{rank:>4}  {plate.text:<10} {plate.digits or '-':<8} "
+               f"{format_price(plate.price):>12}")
+        if show_energy:
+            row += f" {format_energy(plate.energy):>8}"
+        lines.append(row + f"  {_format_hits(plate.hits)}")
 
     if top_n and ranked:
         picks = ranked[:top_n]
@@ -677,6 +980,21 @@ def build_report(title: str, source: str, plates: Sequence[Plate],
         for rank, plate in enumerate(picks, start=1):
             lines.append(f"{rank:>2}. {plate.text}    得分 {format_price(plate.price)}"
                          f"    命中：{_format_hits(plate.hits)}")
+
+    if show_energy:
+        detail = ranked[:max(top_n or 10, 1)]
+        lines.append("")
+        lines.append(f"【数字能量参考（前 {len(detail)} 个）】")
+        lines.append(THIN)
+        lines.append("  口径：八星磁场（相邻两位数字）+ 81 数理 + 河图五行，")
+        lines.append("        属民俗 / 娱乐参考，不是科学结论；可在「数字能量」页签调整。")
+        for rank, plate in enumerate(detail, start=1):
+            energy = plate.energy or {}
+            lines.append("")
+            lines.append(f"  {rank}. {plate.text} ｜ 能量 {energy.get('score', 0)} 分"
+                         f"（{energy.get('grade', '-')}）")
+            for note in energy.get("notes", []):
+                lines.append("     · " + note)
 
     lines.append("")
     lines.append(LINE)
@@ -691,13 +1009,21 @@ def write_text(path: str, text: str) -> str:
     return path
 
 
-def write_csv(path: str, plates: Sequence[Plate]) -> str:
+def write_csv(path: str, plates: Sequence[Plate], mode: str = "score") -> str:
     with open(path, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["排名", "车牌号", "数字部分", "字母部分", "得分", "命中规则"])
-        for rank, plate in enumerate(sort_plates(plates), start=1):
+        writer.writerow(["排名", "车牌号", "数字部分", "字母部分", "得分", "命中规则",
+                         "能量分", "能量等级", "八星组合", "81数理"])
+        for rank, plate in enumerate(sort_plates(plates, mode), start=1):
+            energy = plate.energy or {}
+            pairs = "、".join(f"{pair}→{star}"
+                             for pair, star in energy.get("pairs", []))
+            luck81 = (f"{energy['n81']}{energy['luck81']}"
+                      if energy else "")
             writer.writerow([rank, plate.text, plate.digits, plate.letters,
-                             plate.price, "、".join(plate.hits)])
+                             plate.price, "、".join(plate.hits),
+                             energy.get("score", ""), energy.get("grade", ""),
+                             pairs, luck81])
     return path
 
 

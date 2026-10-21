@@ -20,6 +20,11 @@
   `core.find_tesseract()` 按「指定路径 → 随包分发 → 系统 PATH → 常见安装位置」查找。
   改动这段查找逻辑后，必须用 `--selftest --require-bundled` 验证随包那一路仍然可用。
 - `core.score_plate()` 的分值口径有自检基线（`app.py` 里的 `baseline`），改规则要同步改它。
+- 数字能量（`core.energy_analysis()`：八星磁场 / 81 数理 / 河图五行）默认**只展示**，
+  不参与 `price`；不要偷偷把能量分并进“得分”。它的口径与同作者的
+  `~/Documents/perfect-numbers-app` 对齐，改动后要同步 `app.py` 的 `energy_baseline`
+  并与那边对数。要参与排序只能通过 `energy.sort_mode = "energy"`。
+- 数字能量属于民俗 / 娱乐参考，界面上不能写成确定性结论。
 
 ## 改完必须验证
 
